@@ -284,7 +284,7 @@ fn cgroup_health(settings: &Settings) -> Option<Health> {
     }
     #[cfg(target_os = "linux")]
     {
-        return Some(
+        Some(
             match cgroup::probe_with(settings.backend, settings.cgroup_root.as_deref()) {
                 Ok(path) => Health::Ok(format!(
                     "cgroup=v2 root={} memory_max={:?} pids_max={:?} cpu_quota_us={:?}",
@@ -295,7 +295,7 @@ fn cgroup_health(settings: &Settings) -> Option<Health> {
                 )),
                 Err(error) => Health::Error(error.to_string()),
             },
-        );
+        )
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -473,11 +473,10 @@ impl Sandbox {
     pub fn finish(&self) -> ChildUsage {
         #[cfg(target_os = "linux")]
         {
-            return self
-                .cgroup
+            self.cgroup
                 .as_ref()
                 .map(|prepared| prepared.usage())
-                .unwrap_or_default();
+                .unwrap_or_default()
         }
         #[cfg(not(target_os = "linux"))]
         ChildUsage::default()
