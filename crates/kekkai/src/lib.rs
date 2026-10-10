@@ -28,6 +28,8 @@ use std::process::Command;
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
+mod cgroup;
+#[cfg(target_os = "linux")]
 mod linux;
 
 /// Isolation backend for spawned child processes.
@@ -62,6 +64,46 @@ pub enum Network {
     Allow,
 }
 
+/// Opt-in cgroup v2 limits. Empty means do not use a cgroup.
+///
+/// Requesting any field without a delegated cgroup v2 subtree is an error;
+/// kekkai never falls back to `RLIMIT_AS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CgroupLimits {
+    /// Hard memory cap in bytes (`memory.max`).
+    pub memory_max: Option<u64>,
+    /// Optional throttle threshold in bytes (`memory.high`).
+    pub memory_high: Option<u64>,
+    /// Maximum number of pids (`pids.max`).
+    pub pids_max: Option<u64>,
+    /// CPU quota in microseconds per period (`cpu.max`).
+    pub cpu_quota_us: Option<u64>,
+    /// Period for `cpu.max` in microseconds. Defaults to 100000 when quota is set.
+    pub cpu_period_us: Option<u64>,
+}
+
+impl CgroupLimits {
+    /// True when no cgroup controllers are requested.
+    pub fn is_empty(&self) -> bool {
+        self.memory_max.is_none()
+            && self.memory_high.is_none()
+            && self.pids_max.is_none()
+            && self.cpu_quota_us.is_none()
+            && self.cpu_period_us.is_none()
+    }
+}
+
+/// Usage collected from a child's cgroup after it exits.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChildUsage {
+    /// `memory.events` `oom_kill` was non-zero.
+    pub oom_killed: bool,
+    /// Peak memory in bytes (`memory.peak`), if the controller reported it.
+    pub memory_peak_bytes: Option<u64>,
+    /// CPU time in microseconds (`cpu.stat` `usage_usec`).
+    pub cpu_usec: Option<u64>,
+}
+
 /// Unix resource limits applied in the child before exec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Limits {
@@ -91,6 +133,10 @@ pub struct Settings {
     pub writable_roots: Vec<PathBuf>,
     /// Socket creation policy under `linux_native`. Ignored by other backends.
     pub network: Network,
+    /// Opt-in cgroup v2 limits. Requires `rlimit` or `linux_native`.
+    pub cgroup: CgroupLimits,
+    /// Delegated cgroup v2 directory. `None` probes the current cgroup.
+    pub cgroup_root: Option<PathBuf>,
 }
 
 /// Health of a configured backend on the current host.
@@ -110,6 +156,8 @@ pub struct Capabilities {
     pub landlock_abi: Option<u32>,
     /// The host is Linux, where seccomp-BPF can be installed in `pre_exec`.
     pub seccomp: bool,
+    /// A writable cgroup v2 subtree is available for per-child limits.
+    pub cgroup: bool,
 }
 
 /// Failure to prepare or apply a sandbox.
@@ -181,16 +229,22 @@ pub fn capabilities() -> Capabilities {
     #[cfg(not(target_os = "linux"))]
     let landlock_abi = None;
 
+    #[cfg(target_os = "linux")]
+    let cgroup = cgroup::probe(None).is_ok();
+    #[cfg(not(target_os = "linux"))]
+    let cgroup = false;
+
     Capabilities {
         rlimit,
         landlock_abi,
         seccomp: cfg!(target_os = "linux"),
+        cgroup,
     }
 }
 
 /// Probe the configured backend without constructing a run-scoped ruleset.
 pub fn health(settings: &Settings) -> Health {
-    match settings.backend {
+    let backend = match settings.backend {
         Backend::None => {
             Health::Warning("sandbox:   backend=none — no OS isolation for child processes".into())
         }
@@ -207,6 +261,47 @@ pub fn health(settings: &Settings) -> Health {
             }
         }
         Backend::LinuxNative => linux_native_health(settings),
+    };
+    match (&backend, cgroup_health(settings)) {
+        (_, Some(Health::Error(message))) => Health::Error(message),
+        (Health::Error(_), _) => backend,
+        (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
+        (Health::Warning(base), Some(Health::Ok(extra))) => {
+            Health::Warning(format!("{base}; {extra}"))
+        }
+        _ => backend,
+    }
+}
+
+fn cgroup_health(settings: &Settings) -> Option<Health> {
+    if settings.cgroup.is_empty() {
+        return None;
+    }
+    if matches!(settings.backend, Backend::None) {
+        return Some(Health::Error(
+            "cgroup limits require backend rlimit or linux_native".into(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return Some(
+            match cgroup::probe_with(settings.backend, settings.cgroup_root.as_deref()) {
+                Ok(path) => Health::Ok(format!(
+                    "cgroup=v2 root={} memory_max={:?} pids_max={:?} cpu_quota_us={:?}",
+                    path.display(),
+                    settings.cgroup.memory_max,
+                    settings.cgroup.pids_max,
+                    settings.cgroup.cpu_quota_us
+                )),
+                Err(error) => Health::Error(error.to_string()),
+            },
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some(Health::Error(
+            "cgroup v2 limits are supported only on Linux".into(),
+        ))
     }
 }
 
@@ -243,6 +338,8 @@ pub struct Sandbox {
     settings: Settings,
     #[cfg(target_os = "linux")]
     linux: Option<Arc<linux::LinuxPrepared>>,
+    #[cfg(target_os = "linux")]
+    cgroup: Option<Arc<cgroup::CgroupPrepared>>,
 }
 
 impl Sandbox {
@@ -266,12 +363,24 @@ impl Sandbox {
         } else {
             None
         };
+        #[cfg(target_os = "linux")]
+        let cgroup = if settings.cgroup.is_empty() {
+            None
+        } else {
+            Some(Arc::new(cgroup::prepare(
+                settings.backend,
+                &settings.cgroup,
+                settings.cgroup_root.as_deref(),
+            )?))
+        };
         #[cfg(not(target_os = "linux"))]
         let _ = root;
         Ok(Self {
             settings: settings.clone(),
             #[cfg(target_os = "linux")]
             linux,
+            #[cfg(target_os = "linux")]
+            cgroup,
         })
     }
 
@@ -294,7 +403,8 @@ impl Sandbox {
     fn apply_rlimit(&self, command: &mut Command) -> Result<(), Error> {
         use std::os::unix::process::CommandExt;
 
-        let limits = self.settings.limits;
+        let limits = rlimit_values(&self.settings);
+        let cgroup_fd = self.cgroup_procs_fd();
         // SAFETY: `pre_exec` runs between fork and exec. The closure only
         // performs async-signal-safe libc calls and does not allocate.
         unsafe {
@@ -302,6 +412,7 @@ impl Sandbox {
                 if libc::setpgid(0, 0) != 0 {
                     return Err(io::Error::last_os_error());
                 }
+                join_cgroup(cgroup_fd)?;
                 apply_rlimit_values(limits)
             });
         }
@@ -324,8 +435,9 @@ impl Sandbox {
             .ok_or_else(|| Error::invalid("linux_native ruleset was not prepared"))?;
         linux::apply(
             command,
-            self.settings.limits,
+            rlimit_values(&self.settings),
             matches!(self.settings.network, Network::Deny),
+            self.cgroup_procs_fd(),
             prepared,
         )
     }
@@ -355,6 +467,30 @@ impl Sandbox {
                 let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
             }
         }
+    }
+
+    /// Read cgroup events after the child exits. Empty when no cgroup was used.
+    pub fn finish(&self) -> ChildUsage {
+        #[cfg(target_os = "linux")]
+        {
+            return self
+                .cgroup
+                .as_ref()
+                .map(|prepared| prepared.usage())
+                .unwrap_or_default();
+        }
+        #[cfg(not(target_os = "linux"))]
+        ChildUsage::default()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cgroup_procs_fd(&self) -> Option<i32> {
+        self.cgroup.as_ref().map(|prepared| prepared.procs_fd())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn cgroup_procs_fd(&self) -> Option<i32> {
+        None
     }
 
     /// Scratch directory used as `TMPDIR` under `linux_native`.
@@ -403,6 +539,55 @@ fn validate(settings: &Settings) -> Result<(), Error> {
             )));
         }
     }
+    if !settings.cgroup.is_empty() && matches!(settings.backend, Backend::None) {
+        return Err(Error::invalid(
+            "cgroup limits require backend rlimit or linux_native",
+        ));
+    }
+    for (name, value) in [
+        ("cgroup.memory_max", settings.cgroup.memory_max),
+        ("cgroup.memory_high", settings.cgroup.memory_high),
+        ("cgroup.pids_max", settings.cgroup.pids_max),
+        ("cgroup.cpu_quota_us", settings.cgroup.cpu_quota_us),
+        ("cgroup.cpu_period_us", settings.cgroup.cpu_period_us),
+    ] {
+        if value == Some(0) {
+            return Err(Error::invalid(format!("{name} must be greater than zero")));
+        }
+    }
+    if settings.cgroup.cpu_period_us.is_some() && settings.cgroup.cpu_quota_us.is_none() {
+        return Err(Error::invalid(
+            "cgroup.cpu_period_us requires cgroup.cpu_quota_us",
+        ));
+    }
+    if let Some(root) = &settings.cgroup_root
+        && !root.is_absolute()
+    {
+        return Err(Error::invalid(format!(
+            "cgroup_root `{}` must be an absolute path",
+            root.display()
+        )));
+    }
+    Ok(())
+}
+
+fn rlimit_values(settings: &Settings) -> Limits {
+    let mut limits = settings.limits;
+    if settings.cgroup.memory_max.is_some() {
+        limits.memory_mb = None;
+    }
+    if settings.cgroup.pids_max.is_some() {
+        limits.user_processes = None;
+    }
+    limits
+}
+
+pub(crate) fn join_cgroup(fd: Option<i32>) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(fd) = fd {
+        return cgroup::join(fd);
+    }
+    let _ = fd;
     Ok(())
 }
 
@@ -587,6 +772,42 @@ mod tests {
         assert_eq!(caps.seccomp, cfg!(target_os = "linux"));
         if !cfg!(target_os = "linux") {
             assert_eq!(caps.landlock_abi, None);
+            assert!(!caps.cgroup);
+        }
+    }
+
+    #[test]
+    fn cgroup_limits_without_a_real_backend_are_invalid() {
+        let mut settings = Settings::default();
+        settings.cgroup.memory_max = Some(512 * 1024 * 1024);
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("cgroup"), "{error}");
+    }
+
+    #[test]
+    fn cgroup_limits_fail_closed_without_delegation() {
+        let mut settings = Settings {
+            backend: Backend::Rlimit,
+            ..Settings::default()
+        };
+        settings.cgroup.memory_max = Some(32 * 1024 * 1024);
+        match health(&settings) {
+            Health::Error(message) => {
+                assert!(
+                    message.contains("cgroup") || message.contains("Linux"),
+                    "{message}"
+                );
+                let error = Sandbox::prepare(&settings, ".").unwrap_err();
+                assert!(
+                    matches!(error, Error::Unsupported { .. } | Error::Unavailable { .. }),
+                    "{error}"
+                );
+            }
+            Health::Ok(_) => {
+                let sandbox = Sandbox::prepare(&settings, ".").unwrap();
+                assert!(!sandbox.finish().oom_killed);
+            }
+            Health::Warning(message) => panic!("cgroup request must not warn: {message}"),
         }
     }
 

@@ -18,4 +18,8 @@ sandbox enforces is listed here.
   or `Error::Unavailable`; there is no silent downgrade.
 - Optional `tokio` cargo feature: `Sandbox::apply_tokio` for
   `tokio::process::Command`.
+- Opt-in cgroup v2 limits (`memory.max`, `memory.high`, `pids.max`,
+  `cpu.max`) on `rlimit` and `linux_native`. Missing delegation is an
+  error; there is no fallback to `RLIMIT_AS`. `Sandbox::finish` reports
+  `oom_killed`, peak memory, and CPU usage.
 - ADR 0002: provide a reusable process sandbox library.
