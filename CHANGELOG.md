@@ -23,3 +23,5 @@ sandbox enforces is listed here.
   error; there is no fallback to `RLIMIT_AS`. `Sandbox::finish` reports
   `oom_killed`, peak memory, and CPU usage.
 - ADR 0002: provide a reusable process sandbox library.
+- ADR 0003: guest backend interface for per-run isolation (userspace
+  kernel or KVM microVM). The crate does not ship an adapter yet.

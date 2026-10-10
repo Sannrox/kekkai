@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-10-09
 - Supersedes: —
+- Related: [0003](0003-guest-backend-interface.md)
 
 ## Context
 
@@ -28,8 +29,8 @@ and tested for agent tool execution.
    - `linux_native`: Landlock filesystem allowlist and a seccomp filter that
      denies network sockets, applied in `pre_exec`, without user namespaces
      or a helper binary.
-   cgroup v2 memory and CPU limits are planned. Stronger isolation (gVisor,
-   Firecracker) may come later as an optional backend interface.
+   Opt-in cgroup v2 memory, pids, and CPU limits ship with those backends.
+   Stronger guest isolation is [ADR 0003](0003-guest-backend-interface.md).
 3. Fail closed: selecting a backend the host cannot provide is an error, never
    a silent downgrade. Host detection reports what the kernel supports.
 4. kekkai has no dependency on any control plane, scheduler, or application.

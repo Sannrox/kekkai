@@ -4,7 +4,8 @@ A small Rust library for sandboxing child processes on Linux: a filesystem
 allowlist (Landlock), a syscall and network gate (seccomp), and resource
 limits, applied to a `std::process::Command` before it spawns.
 
-See [ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md).
+See [ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md)
+and [ADR 0003](docs/decisions/0003-guest-backend-interface.md).
 Not yet published to crates.io.
 
 ## What it does
@@ -25,8 +26,8 @@ Not yet published to crates.io.
 - **No helper binary, no user namespaces:** rules are installed in
   `pre_exec`, so it works in unprivileged containers.
 
-Planned: an optional backend interface for stronger isolation such as a
-userspace kernel or a microVM.
+Guest isolation (userspace kernel or KVM microVM) is an accepted
+interface, not a shipped adapter: [ADR 0003](docs/decisions/0003-guest-backend-interface.md).
 
 ## Intended usage
 
