@@ -1,6 +1,6 @@
 # ADR 0002: Provide a reusable process sandbox library
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Supersedes: —
 
