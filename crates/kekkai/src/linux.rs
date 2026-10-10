@@ -211,6 +211,7 @@ pub(super) fn apply(
     command: &mut Command,
     limits: Limits,
     deny_sockets: bool,
+    cgroup_procs_fd: Option<i32>,
     prepared: Arc<LinuxPrepared>,
 ) -> Result<(), Error> {
     command.env("TMPDIR", &prepared.scratch);
@@ -225,6 +226,7 @@ pub(super) fn apply(
             if libc::setpgid(0, 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
+            crate::join_cgroup(cgroup_procs_fd)?;
             crate::apply_rlimit_values(limits)?;
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                 return Err(io::Error::last_os_error());

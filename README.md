@@ -13,8 +13,10 @@ Not yet published to crates.io.
   allow (Landlock, ABI 3 or newer).
 - **No network by default:** a seccomp filter denies socket creation.
   `Network::Allow` leaves sockets to the host; filesystem rules still apply.
-- **Resource limits:** rlimits today; cgroup v2 memory and CPU limits are
-  planned.
+- **Resource limits:** rlimits, plus opt-in cgroup v2 `memory.max`,
+  `pids.max`, and `cpu.max` when a delegated subtree is available.
+  Requesting cgroup limits without one is an error, never a fallback to
+  `RLIMIT_AS`.
 - **Explicit backends:** `none` (development only), `rlimit`, and
   `linux_native`. Selecting a backend the kernel cannot provide is an error,
   never a silent downgrade.
