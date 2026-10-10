@@ -2,11 +2,12 @@
 //!
 //! Kernel-dependent cases print `skip: ...` and return when the host cannot
 //! enforce the backend. They never assert success without running the child.
-//! The child is `kekkai-probe`, copied into the workspace so Landlock can
-//! execute it.
+//! The child is `kekkai-probe`. Its build directory is granted as a readable
+//! root so Landlock can execute it without copying the ELF (which races with
+//! parallel tests on Linux: `ETXTBSY`).
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use kekkai::{Backend, Health, Limits, Network, Sandbox, Settings};
@@ -19,19 +20,6 @@ fn probe_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_kekkai-probe"))
 }
 
-fn probe_in_workspace(workspace: &Path) -> PathBuf {
-    let dst = workspace.join("kekkai-probe");
-    fs::copy(probe_exe(), &dst).expect("copy kekkai-probe into workspace");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&dst).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&dst, perms).unwrap();
-    }
-    dst
-}
-
 fn linux_native_ready() -> Option<(Settings, tempfile::TempDir, PathBuf)> {
     if !cfg!(target_os = "linux") {
         skip("linux_native denial tests require Linux");
@@ -40,10 +28,15 @@ fn linux_native_ready() -> Option<(Settings, tempfile::TempDir, PathBuf)> {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("ws");
     fs::create_dir_all(&workspace).unwrap();
-    let settings = Settings {
+    let mut settings = Settings {
         backend: Backend::LinuxNative,
         ..Settings::default()
     };
+    let probe_dir = probe_exe()
+        .parent()
+        .expect("kekkai-probe has a parent directory")
+        .to_path_buf();
+    settings.readable_roots.push(probe_dir);
     match kekkai::health(&settings) {
         Health::Ok(_) => Some((settings, tmp, workspace)),
         Health::Warning(message) | Health::Error(message) => {
@@ -61,17 +54,20 @@ fn run(sandbox: &Sandbox, mut cmd: Command) -> Output {
     cmd.output().expect("spawn sandboxed child")
 }
 
+fn probe(args: &[&str]) -> Command {
+    let mut cmd = Command::new(probe_exe());
+    cmd.args(args);
+    cmd
+}
+
 #[test]
 fn write_outside_allowed_roots_is_denied() {
     let Some((settings, tmp, workspace)) = linux_native_ready() else {
         return;
     };
-    let probe = probe_in_workspace(&workspace);
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
     let outside = tmp.path().join("outside.txt");
-    let mut cmd = Command::new(&probe);
-    cmd.args(["write", outside.to_str().unwrap()]);
-    let output = run(&sandbox, cmd);
+    let output = run(&sandbox, probe(&["write", outside.to_str().unwrap()]));
     assert!(!outside.exists(), "write escaped to {}", outside.display());
     assert!(
         !output.status.success(),
@@ -85,12 +81,9 @@ fn write_inside_workspace_is_allowed() {
     let Some((settings, _tmp, workspace)) = linux_native_ready() else {
         return;
     };
-    let probe = probe_in_workspace(&workspace);
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
     let inside = workspace.join("ok.txt");
-    let mut cmd = Command::new(&probe);
-    cmd.args(["write", inside.to_str().unwrap()]);
-    let output = run(&sandbox, cmd);
+    let output = run(&sandbox, probe(&["write", inside.to_str().unwrap()]));
     assert!(
         output.status.success(),
         "workspace write failed: stderr={}",
@@ -104,13 +97,10 @@ fn read_of_non_allowed_root_is_denied() {
     let Some((settings, tmp, workspace)) = linux_native_ready() else {
         return;
     };
-    let probe = probe_in_workspace(&workspace);
     let secret = tmp.path().join("host.secret");
     fs::write(&secret, "plane-token\n").unwrap();
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
-    let mut cmd = Command::new(&probe);
-    cmd.args(["read", secret.to_str().unwrap()]);
-    let output = run(&sandbox, cmd);
+    let output = run(&sandbox, probe(&["read", secret.to_str().unwrap()]));
     assert!(
         !output.status.success(),
         "child read a path outside the allowlist: stderr={}",
@@ -133,11 +123,8 @@ fn extra_readable_root_is_readable() {
     let file = extra.join("tool.txt");
     fs::write(&file, "from-extra\n").unwrap();
     settings.readable_roots.push(extra);
-    let probe = probe_in_workspace(&workspace);
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
-    let mut cmd = Command::new(&probe);
-    cmd.args(["read", file.to_str().unwrap()]);
-    let output = run(&sandbox, cmd);
+    let output = run(&sandbox, probe(&["read", file.to_str().unwrap()]));
     assert!(
         output.status.success(),
         "readable_roots was not granted: stderr={}",
@@ -151,11 +138,8 @@ fn socket_creation_is_denied_when_network_is_off() {
     let Some((settings, _tmp, workspace)) = linux_native_ready() else {
         return;
     };
-    let probe = probe_in_workspace(&workspace);
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
-    let mut cmd = Command::new(&probe);
-    cmd.arg("socket");
-    let output = run(&sandbox, cmd);
+    let output = run(&sandbox, probe(&["socket"]));
     assert!(
         !output.status.success(),
         "socket() succeeded with network=deny: stderr={}",
@@ -168,12 +152,9 @@ fn socket_creation_is_allowed_when_network_is_on() {
     let Some((mut settings, _tmp, workspace)) = linux_native_ready() else {
         return;
     };
-    let probe = probe_in_workspace(&workspace);
     settings.network = Network::Allow;
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
-    let mut cmd = Command::new(&probe);
-    cmd.arg("socket");
-    let output = run(&sandbox, cmd);
+    let output = run(&sandbox, probe(&["socket"]));
     assert!(
         output.status.success(),
         "socket() failed with network=allow: stderr={}",
@@ -200,9 +181,10 @@ fn rlimit_file_size_is_enforced() {
     };
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
     let target = workspace.join("big.bin");
-    let mut cmd = Command::new(probe_exe());
-    cmd.args(["write-bytes", target.to_str().unwrap(), "2097152"]);
-    let output = run(&sandbox, cmd);
+    let output = run(
+        &sandbox,
+        probe(&["write-bytes", target.to_str().unwrap(), "2097152"]),
+    );
     let written = fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
     assert!(
         !output.status.success(),
