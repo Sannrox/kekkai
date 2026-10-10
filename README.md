@@ -4,35 +4,48 @@ A small Rust library for sandboxing child processes on Linux: a filesystem
 allowlist (Landlock), a syscall and network gate (seccomp), and resource
 limits, applied to a `std::process::Command` before it spawns.
 
-> Status: early skeleton. The API below is the plan; see
-> [ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md).
-> Not yet published to crates.io.
+See [ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md).
+Not yet published to crates.io.
 
 ## What it does
 
 - **Filesystem allowlist:** the child can read and write only the paths you
   allow (Landlock, ABI 3 or newer).
-- **No network:** a seccomp filter denies socket creation.
+- **No network by default:** a seccomp filter denies socket creation.
+  `Network::Allow` leaves sockets to the host; filesystem rules still apply.
 - **Resource limits:** rlimits today; cgroup v2 memory and CPU limits are
   planned.
 - **Explicit backends:** `none` (development only), `rlimit`, and
   `linux_native`. Selecting a backend the kernel cannot provide is an error,
   never a silent downgrade.
-- **Host detection:** report which backends the running kernel supports.
+- **Host detection:** `health` and `capabilities` report which backends the
+  running kernel supports.
 - **No helper binary, no user namespaces:** rules are installed in
   `pre_exec`, so it works in unprivileged containers.
 
-Planned: an optional backend interface for stronger isolation such as gVisor
-or Firecracker.
+Planned: an optional backend interface for stronger isolation such as a
+userspace kernel or a microVM.
 
 ## Intended usage
 
-```rust,ignore
-let sandbox = kekkai::Sandbox::prepare(&settings, workspace_root)?;
-let mut cmd = std::process::Command::new("python3");
+```rust,no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use std::process::Command;
+use kekkai::{Backend, Sandbox, Settings};
+
+let mut settings = Settings::default();
+settings.backend = Backend::LinuxNative;
+let sandbox = kekkai::Sandbox::prepare(&settings, "/path/to/workspace")?;
+let mut cmd = Command::new("python3");
 sandbox.apply(&mut cmd)?;
 let status = cmd.status()?;
+# let _ = status;
+# Ok(())
+# }
 ```
+
+`tokio::process::Command` is supported behind the `tokio` cargo feature
+(`Sandbox::apply_tokio`).
 
 ## Non-goals
 
@@ -56,6 +69,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`.
+
+Denial tests spawn a real child through `Sandbox::prepare` / `apply`. On
+hosts without Landlock or seccomp they skip with an explicit `skip:`
+message.
 
 ## Security
 
