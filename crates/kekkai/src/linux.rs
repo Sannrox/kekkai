@@ -80,7 +80,6 @@ struct PathBeneathAttr {
 pub(super) struct LinuxPrepared {
     ruleset: OwnedFd,
     pub(super) scratch: PathBuf,
-    pub(super) abi: u32,
 }
 
 impl Drop for LinuxPrepared {
@@ -196,11 +195,7 @@ pub(super) fn prepare(
             return Err(error);
         }
     };
-    let prepared = LinuxPrepared {
-        ruleset,
-        scratch,
-        abi,
-    };
+    let prepared = LinuxPrepared { ruleset, scratch };
     add_path_rules(
         &prepared.ruleset,
         abi,
