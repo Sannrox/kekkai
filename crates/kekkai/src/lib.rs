@@ -135,7 +135,11 @@ pub struct SandboxViolation {
 /// Opt-in cgroup v2 limits. Empty means do not use a cgroup.
 ///
 /// Requesting any field without a delegated cgroup v2 subtree is an error;
-/// kekkai never falls back to `RLIMIT_AS`.
+/// kekkai never falls back to `RLIMIT_AS`. A missing controller (`io`,
+/// `cpu`, `memory`, `pids`) is [`Error::Unavailable`].
+///
+/// This struct is exhaustive: adding a field is a 0.x minor change for
+/// struct literals. Fill unknowns with `..CgroupLimits::default()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CgroupLimits {
     /// Hard memory cap in bytes (`memory.max`).
@@ -148,6 +152,34 @@ pub struct CgroupLimits {
     pub cpu_quota_us: Option<u64>,
     /// Period for `cpu.max` in microseconds. Defaults to 100000 when quota is set.
     pub cpu_period_us: Option<u64>,
+    /// Relative CPU weight (`cpu.weight`). Range 1..=10000.
+    pub cpu_weight: Option<u64>,
+    /// Per-device IO cap (`io.max`).
+    pub io_max: Option<IoMax>,
+}
+
+/// Per-device cgroup v2 `io.max` cap (`major:minor rbps= wbps= riops= wiops=`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IoMax {
+    /// Block device major number.
+    pub major: u32,
+    /// Block device minor number.
+    pub minor: u32,
+    /// Read bytes per second. `None` leaves that dimension uncapped.
+    pub rbps: Option<u64>,
+    /// Write bytes per second.
+    pub wbps: Option<u64>,
+    /// Read IOPS.
+    pub riops: Option<u64>,
+    /// Write IOPS.
+    pub wiops: Option<u64>,
+}
+
+impl IoMax {
+    /// True when no byte or IOPS cap is set.
+    pub fn is_empty(&self) -> bool {
+        self.rbps.is_none() && self.wbps.is_none() && self.riops.is_none() && self.wiops.is_none()
+    }
 }
 
 impl CgroupLimits {
@@ -158,10 +190,15 @@ impl CgroupLimits {
             && self.pids_max.is_none()
             && self.cpu_quota_us.is_none()
             && self.cpu_period_us.is_none()
+            && self.cpu_weight.is_none()
+            && self.io_max.is_none()
     }
 }
 
-/// Usage collected from a child's cgroup after it exits.
+/// Usage collected from a child's cgroup.
+///
+/// [`Sandbox::usage`] may be called while the child is still running.
+/// [`Sandbox::finish`] is the post-exit report and includes violations.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct ChildUsage {
@@ -169,8 +206,16 @@ pub struct ChildUsage {
     pub oom_killed: bool,
     /// Peak memory in bytes (`memory.peak`), if the controller reported it.
     pub memory_peak_bytes: Option<u64>,
+    /// Current memory in bytes (`memory.current`).
+    pub memory_current_bytes: Option<u64>,
     /// CPU time in microseconds (`cpu.stat` `usage_usec`).
     pub cpu_usec: Option<u64>,
+    /// Current pids (`pids.current`).
+    pub pids_current: Option<u64>,
+    /// Bytes read (`io.stat` `rbytes` summed across devices).
+    pub io_rbytes: Option<u64>,
+    /// Bytes written (`io.stat` `wbytes` summed across devices).
+    pub io_wbytes: Option<u64>,
     /// True when [`Sandbox::spawn_with_deadline`] expired the wall-clock limit.
     pub timed_out: bool,
     /// Denials recorded for this child (seccomp user notification and proxy).
@@ -736,13 +781,22 @@ fn cgroup_health(settings: &Settings) -> Option<Health> {
     #[cfg(target_os = "linux")]
     {
         Some(
-            match cgroup::probe_with(settings.backend, settings.cgroup_root.as_deref()) {
+            match cgroup::probe_with(
+                settings.backend,
+                settings.cgroup_root.as_deref(),
+                &settings.cgroup,
+            ) {
                 Ok(path) => Health::Ok(format!(
-                    "cgroup=v2 root={} memory_max={:?} pids_max={:?} cpu_quota_us={:?}",
+                    "cgroup=v2 root={} memory_max={:?} pids_max={:?} cpu_quota_us={:?} cpu_weight={:?} io_max={}",
                     path.display(),
                     settings.cgroup.memory_max,
                     settings.cgroup.pids_max,
-                    settings.cgroup.cpu_quota_us
+                    settings.cgroup.cpu_quota_us,
+                    settings.cgroup.cpu_weight,
+                    match settings.cgroup.io_max {
+                        Some(_) => "set",
+                        None => "none",
+                    }
                 )),
                 Err(error) => Health::Error(error.to_string()),
             },
@@ -1279,6 +1333,22 @@ impl Sandbox {
         }
     }
 
+    /// Live cgroup snapshot while a child may still be running.
+    ///
+    /// Empty when no cgroup was prepared. Values come from `memory.current`,
+    /// `cpu.stat`, `io.stat`, and `pids.current`.
+    pub fn usage(&self) -> ChildUsage {
+        #[cfg(target_os = "linux")]
+        {
+            self.cgroup
+                .as_ref()
+                .map(|prepared| prepared.usage())
+                .unwrap_or_default()
+        }
+        #[cfg(not(target_os = "linux"))]
+        ChildUsage::default()
+    }
+
     /// Read cgroup events after the child exits. Empty when no cgroup was used.
     pub fn finish(&self) -> ChildUsage {
         #[cfg(target_os = "linux")]
@@ -1509,9 +1579,34 @@ fn validate(settings: &Settings) -> Result<(), Error> {
         ("cgroup.pids_max", settings.cgroup.pids_max),
         ("cgroup.cpu_quota_us", settings.cgroup.cpu_quota_us),
         ("cgroup.cpu_period_us", settings.cgroup.cpu_period_us),
+        ("cgroup.cpu_weight", settings.cgroup.cpu_weight),
     ] {
         if value == Some(0) {
             return Err(Error::invalid(format!("{name} must be greater than zero")));
+        }
+    }
+    if let Some(weight) = settings.cgroup.cpu_weight
+        && weight > 10_000
+    {
+        return Err(Error::invalid(
+            "cgroup.cpu_weight must be between 1 and 10000",
+        ));
+    }
+    if let Some(io) = settings.cgroup.io_max {
+        if io.is_empty() {
+            return Err(Error::invalid(
+                "cgroup.io_max must set rbps, wbps, riops, or wiops",
+            ));
+        }
+        for (name, value) in [
+            ("cgroup.io_max.rbps", io.rbps),
+            ("cgroup.io_max.wbps", io.wbps),
+            ("cgroup.io_max.riops", io.riops),
+            ("cgroup.io_max.wiops", io.wiops),
+        ] {
+            if value == Some(0) {
+                return Err(Error::invalid(format!("{name} must be greater than zero")));
+            }
         }
     }
     if settings.cgroup.cpu_period_us.is_some() && settings.cgroup.cpu_quota_us.is_none() {
@@ -1929,6 +2024,57 @@ mod tests {
         };
         let error = Sandbox::prepare(&settings, ".").unwrap_err();
         assert!(error.to_string().contains("filesystem view"), "{error}");
+    }
+
+    #[test]
+    fn cpu_weight_out_of_range_is_invalid() {
+        let settings = Settings {
+            backend: Backend::Rlimit,
+            cgroup: CgroupLimits {
+                cpu_weight: Some(10_001),
+                ..CgroupLimits::default()
+            },
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("cpu_weight"), "{error}");
+    }
+
+    #[test]
+    fn empty_io_max_is_invalid() {
+        let settings = Settings {
+            backend: Backend::Rlimit,
+            cgroup: CgroupLimits {
+                io_max: Some(IoMax {
+                    major: 8,
+                    minor: 0,
+                    ..IoMax::default()
+                }),
+                ..CgroupLimits::default()
+            },
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("io_max"), "{error}");
+    }
+
+    #[test]
+    fn io_max_zero_dimension_is_invalid() {
+        let settings = Settings {
+            backend: Backend::Rlimit,
+            cgroup: CgroupLimits {
+                io_max: Some(IoMax {
+                    major: 8,
+                    minor: 0,
+                    wbps: Some(0),
+                    ..IoMax::default()
+                }),
+                ..CgroupLimits::default()
+            },
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("io_max"), "{error}");
     }
 
     #[test]

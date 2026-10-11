@@ -85,6 +85,12 @@ sandbox enforces is listed here.
   the profile names it. Strict and Python require `linux_native`.
   `health` reports `syscalls=default|strict|python`. CI runs the test
   suite on aarch64 as well as x86_64.
+- Cgroup `io.max` (per-device `IoMax`) and `cpu.weight` (1..=10000) on
+  `CgroupLimits`. A missing `io` or `cpu` controller is
+  `Error::Unavailable`. `Sandbox::usage` returns a live snapshot
+  (`memory.current`, `cpu.stat`, `io.stat`, `pids.current`) while the
+  child may still be running. `CgroupLimits` stays exhaustive; adding a
+  field is a 0.x minor change.
 
 ### Changed
 

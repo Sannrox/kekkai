@@ -23,9 +23,11 @@ Not yet published to crates.io.
   on a unix socket; direct IP sockets fail. `Network::Loopback` places the
   child in a private network namespace with only loopback up.
 - **Resource limits:** rlimits, plus opt-in cgroup v2 `memory.max`,
-  `pids.max`, and `cpu.max` when a delegated subtree is available.
-  Requesting cgroup limits without one is an error, never a fallback to
-  `RLIMIT_AS`.
+  `pids.max`, `cpu.max`, `cpu.weight`, and `io.max` when a delegated
+  subtree is available. Requesting cgroup limits without one, or a
+  controller the subtree does not provide, is an error, never a
+  fallback to `RLIMIT_AS`. `Sandbox::usage` snapshots live usage;
+  `finish` reports after exit.
 - **Explicit backends:** `none` (development only), `rlimit`, and
   `linux_native`. Selecting a backend the kernel cannot provide is an error,
   never a silent downgrade.

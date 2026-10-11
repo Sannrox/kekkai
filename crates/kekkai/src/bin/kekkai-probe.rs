@@ -5,6 +5,20 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+fn write_sync_bytes(path: &str, n: usize) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = fs::File::create(path)?;
+    let chunk = [0u8; 4096];
+    let mut left = n;
+    while left > 0 {
+        let n = left.min(chunk.len());
+        file.write_all(&chunk[..n])?;
+        file.sync_all()?;
+        left -= n;
+    }
+    Ok(())
+}
+
 fn mmap_va(n: usize) -> ExitCode {
     #[cfg(unix)]
     {
@@ -38,7 +52,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(action) = args.next() else {
         eprintln!(
-            "usage: kekkai-probe write|read|env|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect|ptrace|io-uring|personality|read-fd|connect-abstract|loopback ..."
+            "usage: kekkai-probe write|read|env|socket|write-bytes|write-sync-bytes|write-sync-loop|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect|ptrace|io-uring|personality|read-fd|connect-abstract|loopback ..."
         );
         return ExitCode::from(2);
     };
@@ -105,6 +119,32 @@ fn main() -> ExitCode {
                 Err(error) => {
                     eprintln!("write-bytes {path}: {error}");
                     ExitCode::FAILURE
+                }
+            }
+        }
+        "write-sync-bytes" => {
+            let Some(path) = args.next() else {
+                return ExitCode::from(2);
+            };
+            let Some(n) = args.next().and_then(|s| s.parse::<usize>().ok()) else {
+                return ExitCode::from(2);
+            };
+            match write_sync_bytes(&path, n) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("write-sync-bytes {path}: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "write-sync-loop" => {
+            let Some(path) = args.next() else {
+                return ExitCode::from(2);
+            };
+            loop {
+                if let Err(error) = write_sync_bytes(&path, 4096) {
+                    eprintln!("write-sync-loop {path}: {error}");
+                    return ExitCode::FAILURE;
                 }
             }
         }
