@@ -29,3 +29,8 @@ sandbox enforces is listed here.
   wall-clock `SIGTERM`, then `SIGKILL` of the process group and
   `cgroup.kill`. `ChildUsage.timed_out` is set only when the deadline
   expires.
+- `Sandbox::spawn_with_deadline_captured` (and
+  `spawn_with_deadline_captured_tokio`): optional stdout and stderr
+  capture with per-stream byte caps, head/tail/both retention, and a
+  `truncated` marker plus dropped count. Overflow is drained so the
+  child does not block on a full pipe.

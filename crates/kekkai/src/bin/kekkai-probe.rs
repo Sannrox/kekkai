@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(action) = args.next() else {
         eprintln!(
-            "usage: kekkai-probe write|read|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent ..."
+            "usage: kekkai-probe write|read|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr ..."
         );
         return ExitCode::from(2);
     };
@@ -237,6 +237,36 @@ fn main() -> ExitCode {
                 eprintln!("term-parent requires Unix");
                 ExitCode::from(2)
             }
+        }
+        "fill-stdout" | "fill-stderr" | "fill-seq-stdout" | "fill-seq-stderr" => {
+            let Some(n) = args.next().and_then(|s| s.parse::<usize>().ok()) else {
+                return ExitCode::from(2);
+            };
+            let sequential = action.starts_with("fill-seq-");
+            let mut chunk = vec![b'A'; 4096];
+            let mut left = n;
+            let mut seq = 0_u8;
+            let stdout = action.ends_with("stdout");
+            let out: &mut dyn std::io::Write = if stdout {
+                &mut std::io::stdout()
+            } else {
+                &mut std::io::stderr()
+            };
+            while left > 0 {
+                let take = left.min(chunk.len());
+                if sequential {
+                    for b in &mut chunk[..take] {
+                        *b = seq;
+                        seq = seq.wrapping_add(1);
+                    }
+                }
+                if out.write_all(&chunk[..take]).is_err() {
+                    return ExitCode::FAILURE;
+                }
+                left -= take;
+            }
+            let _ = out.flush();
+            ExitCode::SUCCESS
         }
         other => {
             eprintln!("unknown action {other}");
