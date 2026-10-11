@@ -14,15 +14,20 @@ Choose one. There is no fallback.
 | `none` | None. `health` is a warning. | Development only. |
 | `rlimit` | Unix rlimits and a new process group. No filesystem or socket rules. | Resource caps on a host that cannot run Landlock/seccomp, or as a first cut. |
 | `linux_native` | Landlock filesystem allowlist (ABI 3 floor) plus a seccomp filter that denies `socket()` when `Network::Deny`. Rlimits and a process group. | Default for untrusted children on Linux. |
+| `userspace` | A helper owns spawn (`Sandbox::spawn` / `Sandbox::command`). Filesystem and network policy are applied inside the helper. Requires cargo feature `guest`. | Mutually distrusting runs on one Linux host when in-process isolation is not enough. |
 
 Opt-in cgroup v2 limits (`memory.max`, `memory.high`, `pids.max`, `cpu.max`,
 `cpu.weight`, `io.max`) attach to `rlimit` or `linux_native`. They require
 a writable delegated subtree. Missing delegation or a missing controller
 is `Error::Unavailable`; kekkai never falls back to `RLIMIT_AS`.
 
-Guest isolation (a userspace kernel or a KVM microVM) is an accepted
-interface, not a shipped adapter. See
-[ADR 0003](decisions/0003-guest-backend-interface.md).
+`userspace` looks for `Settings.guest_helper`, then `KEKKAI_GUEST_HELPER`,
+then `kekkai-guest` on `PATH`. A missing helper is `Error::Unavailable`.
+`apply` on a userspace sandbox is `Error::Invalid`. The helper is the
+process-group leader; the payload stays in that group. The helper waits
+for the payload and removes scratch on a clean or `SIGTERM` exit. A hard
+`SIGKILL` of the helper can leave scratch under `TMPDIR`. A KVM adapter
+is not shipped. See [ADR 0003](decisions/0003-guest-backend-interface.md).
 
 ## Host detection
 
@@ -129,9 +134,9 @@ cannot reach host interfaces or host abstract unix sockets.
   `Network::Allowlist` is proxy-mediated: IP `socket()` stays denied.
 - Scheduling, image management, or orchestration.
 - What command to run, retries, or audit logs. Those belong to the caller.
-- Real isolation on non-Linux hosts. `linux_native` is unsupported there;
-  `rlimit` still applies Unix resource limits.
-- A guest adapter. ADR 0003 is the interface only.
+- Real isolation on non-Linux hosts. `linux_native` and `userspace` are
+  unsupported there; `rlimit` still applies Unix resource limits.
+- A KVM microVM adapter. `userspace` is the first guest backend.
 
 ## Recommended settings
 

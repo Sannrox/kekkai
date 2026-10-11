@@ -24,7 +24,16 @@ sandbox enforces is listed here.
   `oom_killed`, peak memory, and CPU usage.
 - ADR 0002: provide a reusable process sandbox library.
 - ADR 0003: guest backend interface for per-run isolation (userspace
-  kernel or KVM microVM). The crate does not ship an adapter yet.
+  kernel or KVM microVM).
+- `Backend::Userspace` behind the `guest` cargo feature: a helper owns
+  spawn (`Sandbox::spawn` / `Sandbox::command`). `apply` on a guest
+  sandbox is `Error::Invalid`. A missing helper is `Error::Unavailable`;
+  a non-Linux host is `Error::Unsupported`. There is no downgrade to
+  `linux_native`. The default helper is `kekkai-guest` (or
+  `Settings.guest_helper` / `KEKKAI_GUEST_HELPER`). The helper is the
+  process-group leader; the payload stays in that group. The helper
+  applies `linux_native` to the payload, waits, and removes scratch on a
+  clean or `SIGTERM` exit. A KVM adapter is not shipped.
 - `Sandbox::spawn_with_deadline` (and `spawn_with_deadline_tokio`):
   wall-clock `SIGTERM`, then `SIGKILL` of the process group and
   `cgroup.kill`. `ChildUsage.timed_out` is set only when the deadline

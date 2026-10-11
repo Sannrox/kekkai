@@ -20,6 +20,14 @@ doc = false
 test = false
 bench = false
 
+[[bin]]
+name = "kekkai-guest"
+path = "src/bin/kekkai-guest.rs"
+required-features = ["guest"]
+doc = false
+test = false
+bench = false
+
 [[example]]
 name = "transform"
 path = "../../examples/transform.rs"
@@ -32,6 +40,7 @@ path = "../../examples/agent_shell.rs"
 default = []
 tokio = ["dep:tokio"]
 tracing = ["dep:tracing"]
+guest = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

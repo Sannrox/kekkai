@@ -71,3 +71,15 @@ adapter until one compiles against that interface. Prefer a userspace
 kernel adapter first: it matches the current "no extra images" host story
 and works without KVM. Add a microVM adapter where the caller can provide
 KVM and a rootfs and needs a separate kernel.
+
+## First adapter
+
+The userspace adapter launches a helper (`kekkai-guest`, or a path the
+caller supplies). The helper is the process-group leader; the payload
+stays in that group. The helper installs filesystem and network policy
+on the payload, waits, and removes scratch on a clean or `SIGTERM` exit.
+kekkai does not `apply` on the caller's `Command`. A missing helper is
+`Unavailable`. The helper CLI is owned by kekkai (`--workspace`,
+`--network`, path flags, then `--` and the program). Callers may point
+`guest_helper` at another binary that speaks the same flags. No guest
+kernel image. A KVM adapter is a later Issue.

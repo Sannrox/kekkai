@@ -12,7 +12,7 @@ pub const SCHEMA_VERSION: u32 = 1;
 #[non_exhaustive]
 #[serde(default)]
 pub struct SettingsSummary {
-    /// [`crate::Backend`] display name (`none`, `rlimit`, `linux_native`).
+    /// [`crate::Backend`] display name (`none`, `rlimit`, `linux_native`, `userspace`).
     pub backend: String,
     /// Network policy kind (`deny`, `allow`, `allowlist`, `loopback`).
     pub network: String,

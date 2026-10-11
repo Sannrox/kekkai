@@ -28,26 +28,28 @@ Not yet published to crates.io.
   controller the subtree does not provide, is an error, never a
   fallback to `RLIMIT_AS`. `Sandbox::usage` snapshots live usage;
   `finish` reports after exit.
-- **Explicit backends:** `none` (development only), `rlimit`, and
-  `linux_native`. Selecting a backend the kernel cannot provide is an error,
-  never a silent downgrade.
+- **Explicit backends:** `none` (development only), `rlimit`,
+  `linux_native`, and `userspace` (opt-in `guest` cargo feature). Selecting
+  a backend the kernel cannot provide is an error, never a silent downgrade.
 - **Host detection:** `health` and `capabilities` report which backends the
   running kernel supports. `ChildUsage.violations` records seccomp-denied
   syscalls when user notification is available, and CONNECT denials from
   the egress proxy. Filesystem Landlock denials are reported as unavailable
   until the host exposes an unprivileged event stream.
-- **No helper binary:** rules are installed in `pre_exec`, so it works in
-  unprivileged containers. Extra file descriptors above stderr do not
-  survive `exec`; `ptrace` is denied. `SyscallProfile::Default` is the
-  historical denylist; `Strict` and `Python` are per-architecture
-  allowlists. `Namespaces::Isolate` is opt-in user/mount/PID/IPC/UTS
-  namespaces when the host allows them. `FilesystemView::Isolate` adds
-  read-only binds, tmpfs scratch, and an overlay whose writes are
-  discarded or kept. `Network::Loopback` adds a private network
-  namespace with only loopback up.
-
-Guest isolation (userspace kernel or KVM microVM) is an accepted
-interface, not a shipped adapter: [ADR 0003](docs/decisions/0003-guest-backend-interface.md).
+- **In-process by default:** `rlimit` and `linux_native` install rules in
+  `pre_exec`, so they work in unprivileged containers. Extra file
+  descriptors above stderr do not survive `exec`; `ptrace` is denied.
+  `SyscallProfile::Default` is the historical denylist; `Strict` and
+  `Python` are per-architecture allowlists. `Namespaces::Isolate` is
+  opt-in user/mount/PID/IPC/UTS namespaces when the host allows them.
+  `FilesystemView::Isolate` adds read-only binds, tmpfs scratch, and an
+  overlay whose writes are discarded or kept. `Network::Loopback` adds a
+  private network namespace with only loopback up.
+- **Userspace guest:** `Backend::Userspace` (cargo feature `guest`)
+  launches a helper that owns spawn. The helper is the process-group
+  leader; the payload stays in that group. `apply` is invalid on that
+  sandbox. A missing helper is unavailable. See
+  [ADR 0003](docs/decisions/0003-guest-backend-interface.md).
 
 ## Intended usage
 
