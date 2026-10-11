@@ -102,6 +102,8 @@ fn python_readable_roots(python: &std::path::Path) -> Vec<PathBuf> {
             roots.push(PathBuf::from(prefix));
         }
     }
+    roots.push(PathBuf::from("/proc"));
+    roots.push(PathBuf::from("/sys"));
     roots
 }
 
