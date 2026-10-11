@@ -8,6 +8,7 @@ use crate::CaptureKeep;
 
 /// Bytes kept from one captured stream, plus truncation metadata.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StreamCapture {
     /// Kept bytes. Length is at most the configured cap.
     pub bytes: Vec<u8>,

@@ -22,20 +22,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     std::fs::create_dir_all(&output)?;
 
-    let settings = Settings {
-        backend: Backend::LinuxNative,
-        network: Network::Deny,
-        inputs: vec![input.clone()],
-        output: Some(output.clone()),
-        cgroup: CgroupLimits {
+    let settings = Settings::builder()
+        .backend(Backend::LinuxNative)
+        .network(Network::Deny)
+        .inputs(vec![input.clone()])
+        .output(Some(output.clone()))
+        .cgroup(CgroupLimits {
             memory_max: Some(512 * 1024 * 1024),
             ..CgroupLimits::default()
-        },
-        ..Settings::default()
-    };
+        })
+        .build();
     match kekkai::health(&settings) {
         Health::Ok(message) | Health::Warning(message) => eprintln!("{message}"),
         Health::Error(message) => return Err(message.into()),
+        other => {
+            return Err(format!("unrecognized sandbox health status: {other:?}").into());
+        }
     }
 
     let sandbox = Sandbox::prepare(&settings, &output)?;

@@ -4,13 +4,19 @@
 //! gate (seccomp) and resource limits to a [`std::process::Command`] before it
 //! spawns.
 //!
+//! Public enums and [`Settings`] are `#[non_exhaustive]`. Construct settings
+//! with [`Settings::builder`] so adding a field later is not a breaking change.
+//! A change to what the sandbox allows or denies is a versioned change, never
+//! a patch-level surprise.
+//!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::process::Command;
 //! use kekkai::{Backend, Sandbox, Settings};
 //!
-//! let mut settings = Settings::default();
-//! settings.backend = Backend::LinuxNative;
+//! let settings = Settings::builder()
+//!     .backend(Backend::LinuxNative)
+//!     .build();
 //! let sandbox = Sandbox::prepare(&settings, "/path/to/workspace")?;
 //! let mut cmd = Command::new("python3");
 //! sandbox.apply(&mut cmd)?;
@@ -18,6 +24,7 @@
 //! # Ok(())
 //! # }
 //! ```
+#![deny(missing_docs)]
 
 use std::fmt;
 use std::fs;
@@ -42,6 +49,7 @@ pub use capture::StreamCapture;
 
 /// Isolation backend for spawned child processes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Backend {
     /// No isolation (development only).
     #[default]
@@ -64,6 +72,7 @@ impl fmt::Display for Backend {
 
 /// Whether the child may create network sockets.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Network {
     /// `socket()` fails with `EPERM`. This is the default.
     #[default]
@@ -80,14 +89,17 @@ pub enum Network {
 ///
 /// Matching is by the CONNECT target string, not by DNS. A raw IP does not
 /// match a hostname entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AllowHost {
+    /// Hostname or literal address as it appears in CONNECT.
     pub host: String,
+    /// When set, only this port matches.
     pub port: Option<u16>,
 }
 
 /// Kind of recorded sandbox denial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ViolationKind {
     /// The egress proxy refused a CONNECT target.
     Network,
@@ -100,10 +112,13 @@ pub enum ViolationKind {
 
 /// One denial class observed for a child.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SandboxViolation {
+    /// Class of denial.
     pub kind: ViolationKind,
     /// Host:port for network denials, path for filesystem, syscall name otherwise.
     pub detail: String,
+    /// Times this denial was observed.
     pub count: u64,
 }
 
@@ -138,6 +153,7 @@ impl CgroupLimits {
 
 /// Usage collected from a child's cgroup after it exits.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct ChildUsage {
     /// `memory.events` `oom_kill` was non-zero.
     pub oom_killed: bool,
@@ -158,6 +174,7 @@ pub struct ChildUsage {
 
 /// Which end of a captured stream to keep when it exceeds the cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum CaptureKeep {
     /// First `max` bytes.
     #[default]
@@ -195,7 +212,17 @@ pub struct Limits {
 }
 
 /// Settings for [`Sandbox::prepare`].
+///
+/// Construct with [`Settings::builder`]. Adding a field is not a breaking
+/// change for that path.
+///
+/// ```
+/// use kekkai::{Backend, Settings};
+/// let settings = Settings::builder().backend(Backend::None).build();
+/// assert_eq!(settings.backend, Backend::None);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct Settings {
     /// Isolation backend. Selecting one the host cannot provide is an error.
     pub backend: Backend,
@@ -224,16 +251,95 @@ pub struct Settings {
     pub cgroup_root: Option<PathBuf>,
 }
 
+impl Settings {
+    /// Start a builder. Adding a field to [`Settings`] does not break this.
+    pub fn builder() -> SettingsBuilder {
+        SettingsBuilder::default()
+    }
+}
+
+/// Builder for [`Settings`].
+#[derive(Debug, Clone, Default)]
+pub struct SettingsBuilder {
+    inner: Settings,
+}
+
+impl SettingsBuilder {
+    /// Isolation backend.
+    pub fn backend(mut self, backend: Backend) -> Self {
+        self.inner.backend = backend;
+        self
+    }
+
+    /// Resource limits.
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.inner.limits = limits;
+        self
+    }
+
+    /// Read-only input paths.
+    pub fn inputs(mut self, inputs: Vec<PathBuf>) -> Self {
+        self.inner.inputs = inputs;
+        self
+    }
+
+    /// Writable output directory.
+    pub fn output(mut self, output: Option<PathBuf>) -> Self {
+        self.inner.output = output;
+        self
+    }
+
+    /// Extra read-and-execute paths.
+    pub fn readable_roots(mut self, readable_roots: Vec<PathBuf>) -> Self {
+        self.inner.readable_roots = readable_roots;
+        self
+    }
+
+    /// Extra read-and-write paths.
+    pub fn writable_roots(mut self, writable_roots: Vec<PathBuf>) -> Self {
+        self.inner.writable_roots = writable_roots;
+        self
+    }
+
+    /// Socket creation policy.
+    pub fn network(mut self, network: Network) -> Self {
+        self.inner.network = network;
+        self
+    }
+
+    /// Opt-in cgroup v2 limits.
+    pub fn cgroup(mut self, cgroup: CgroupLimits) -> Self {
+        self.inner.cgroup = cgroup;
+        self
+    }
+
+    /// Delegated cgroup v2 directory.
+    pub fn cgroup_root(mut self, cgroup_root: Option<PathBuf>) -> Self {
+        self.inner.cgroup_root = cgroup_root;
+        self
+    }
+
+    /// Finish the builder.
+    pub fn build(self) -> Settings {
+        self.inner
+    }
+}
+
 /// Health of a configured backend on the current host.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Health {
+    /// Prepare can proceed.
     Ok(String),
+    /// Prepare can proceed with a warning (`none` always warns).
     Warning(String),
+    /// Prepare will fail with [`Error::Unsupported`] or [`Error::Unavailable`].
     Error(String),
 }
 
 /// Host kernel capabilities that affect backend selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Capabilities {
     /// Unix resource limits can be applied in `pre_exec`.
     pub rlimit: bool,
@@ -249,13 +355,27 @@ pub struct Capabilities {
 
 /// Failure to prepare or apply a sandbox.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// The backend is not implemented on this operating system.
-    Unsupported { backend: Backend, message: String },
+    Unsupported {
+        /// Backend that is not implemented here.
+        backend: Backend,
+        /// Human-readable reason.
+        message: String,
+    },
     /// The backend is implemented but the host cannot enforce it.
-    Unavailable { backend: Backend, message: String },
+    Unavailable {
+        /// Backend the host cannot enforce.
+        backend: Backend,
+        /// Human-readable reason.
+        message: String,
+    },
     /// Settings or paths cannot be used.
-    Invalid { message: String },
+    Invalid {
+        /// Human-readable reason.
+        message: String,
+    },
 }
 
 impl Error {

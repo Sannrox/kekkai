@@ -19,13 +19,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(usage.into());
     }
 
-    let settings = Settings {
-        backend: Backend::LinuxNative,
-        ..Settings::default()
-    };
+    let settings = Settings::builder().backend(Backend::LinuxNative).build();
     match kekkai::health(&settings) {
         Health::Ok(message) | Health::Warning(message) => eprintln!("{message}"),
         Health::Error(message) => return Err(message.into()),
+        other => {
+            return Err(format!("unrecognized sandbox health status: {other:?}").into());
+        }
     }
 
     let sandbox = Sandbox::prepare(&settings, &workspace)?;

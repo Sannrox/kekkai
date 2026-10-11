@@ -11,10 +11,7 @@ fn probe_exe() -> PathBuf {
 }
 
 fn rlimit_sandbox() -> Sandbox {
-    let settings = Settings {
-        backend: Backend::Rlimit,
-        ..Settings::default()
-    };
+    let settings = Settings::builder().backend(Backend::Rlimit).build();
     Sandbox::prepare(&settings, ".").expect("prepare")
 }
 
