@@ -34,3 +34,6 @@ sandbox enforces is listed here.
   capture with per-stream byte caps, head/tail/both retention, and a
   `truncated` marker plus dropped count. Overflow is drained so the
   child does not block on a full pipe.
+- Consumer guide (`docs/consumer-guide.md`) and `examples/` for a
+  read-only Python/DuckDB transform and an agent shell with deadline
+  plus output caps. CI runs `cargo build --examples`.

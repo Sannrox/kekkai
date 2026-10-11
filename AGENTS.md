@@ -14,7 +14,8 @@ Keep the public API small: settings in, a prepared sandbox out, applied to a
 `Command` before spawn. Do not commit local state (`.state/`,
 `.kekkai-state/`), test scratch trees, or generated runtime artifacts.
 
-Human documentation: [README.md](README.md). Architecture decisions:
+Human documentation: [README.md](README.md) and the
+[consumer guide](docs/consumer-guide.md). Architecture decisions:
 [docs/decisions/](docs/decisions/README.md). `CLAUDE.md` only points here;
 this file is canonical.
 
@@ -43,6 +44,7 @@ The compiler is pinned in `rust-toolchain.toml`. Local gates match CI
 ```sh
 cargo fmt --all -- --check
 cargo build --locked --workspace --all-targets
+cargo build --locked --workspace --examples
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 bash scripts/validate-workflow-skills.sh
