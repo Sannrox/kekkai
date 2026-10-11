@@ -22,15 +22,18 @@
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[cfg(target_os = "linux")]
 use std::sync::Arc;
 
+mod capture;
 #[cfg(target_os = "linux")]
 mod cgroup;
 #[cfg(target_os = "linux")]
 mod linux;
+
+pub use capture::StreamCapture;
 
 /// Isolation backend for spawned child processes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -104,6 +107,29 @@ pub struct ChildUsage {
     pub cpu_usec: Option<u64>,
     /// True when [`Sandbox::spawn_with_deadline`] expired the wall-clock limit.
     pub timed_out: bool,
+}
+
+/// Which end of a captured stream to keep when it exceeds the cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureKeep {
+    /// First `max` bytes.
+    #[default]
+    Head,
+    /// Last `max` bytes.
+    Tail,
+    /// First and last halves of `max` bytes; the middle is dropped.
+    HeadAndTail,
+}
+
+/// Per-stream byte caps for [`Sandbox::spawn_with_deadline_captured`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CaptureLimits {
+    /// Maximum kept stdout bytes. `None` leaves stdout to the caller.
+    pub stdout_max: Option<usize>,
+    /// Maximum kept stderr bytes. `None` leaves stderr to the caller.
+    pub stderr_max: Option<usize>,
+    /// Head, tail, or both when a stream exceeds its cap.
+    pub keep: CaptureKeep,
 }
 
 /// Unix resource limits applied in the child before exec.
@@ -474,6 +500,73 @@ impl Sandbox {
         let mut child = command
             .spawn()
             .map_err(|error| Error::invalid(format!("spawn sandboxed command: {error}")))?;
+        self.wait_child_deadline(&mut child, deadline, term_grace)
+    }
+
+    /// Like [`Self::spawn_with_deadline`], capturing stdout and stderr under byte caps.
+    ///
+    /// Bytes past the cap are drained so the child does not block on a full pipe.
+    /// Kept memory is bounded by the cap (plus a small read buffer).
+    pub fn spawn_with_deadline_captured(
+        &self,
+        command: &mut Command,
+        deadline: std::time::Duration,
+        term_grace: std::time::Duration,
+        capture: CaptureLimits,
+    ) -> Result<
+        (
+            std::process::ExitStatus,
+            ChildUsage,
+            StreamCapture,
+            StreamCapture,
+        ),
+        Error,
+    > {
+        self.apply(command)?;
+        self.spawn_captured_applied(command, deadline, term_grace, capture)
+    }
+
+    fn spawn_captured_applied(
+        &self,
+        command: &mut Command,
+        deadline: std::time::Duration,
+        term_grace: std::time::Duration,
+        capture: CaptureLimits,
+    ) -> Result<
+        (
+            std::process::ExitStatus,
+            ChildUsage,
+            StreamCapture,
+            StreamCapture,
+        ),
+        Error,
+    > {
+        if capture.stdout_max.is_some() {
+            command.stdout(Stdio::piped());
+        }
+        if capture.stderr_max.is_some() {
+            command.stderr(Stdio::piped());
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::invalid(format!("spawn sandboxed command: {error}")))?;
+        let stdout = capture::spawn_drain(child.stdout.take(), capture.stdout_max, capture.keep);
+        let stderr = capture::spawn_drain(child.stderr.take(), capture.stderr_max, capture.keep);
+        let (status, usage) = self.wait_child_deadline(&mut child, deadline, term_grace)?;
+        Ok((
+            status,
+            usage,
+            capture::join_drain(stdout),
+            capture::join_drain(stderr),
+        ))
+    }
+
+    fn wait_child_deadline(
+        &self,
+        child: &mut std::process::Child,
+        deadline: std::time::Duration,
+        term_grace: std::time::Duration,
+    ) -> Result<(std::process::ExitStatus, ChildUsage), Error> {
         let pid = child.id();
         let mut guard = DeadlineGuard {
             sandbox: self,
@@ -566,6 +659,30 @@ impl Sandbox {
                 }
             }
         }
+    }
+
+    /// Tokio entry that captures through the std helper after `apply_tokio`.
+    ///
+    /// Drains and waits on the calling thread (std pipes plus drain threads).
+    #[cfg(feature = "tokio")]
+    #[allow(clippy::unused_async)]
+    pub async fn spawn_with_deadline_captured_tokio(
+        &self,
+        command: &mut tokio::process::Command,
+        deadline: std::time::Duration,
+        term_grace: std::time::Duration,
+        capture: CaptureLimits,
+    ) -> Result<
+        (
+            std::process::ExitStatus,
+            ChildUsage,
+            StreamCapture,
+            StreamCapture,
+        ),
+        Error,
+    > {
+        self.apply_tokio(command)?;
+        self.spawn_captured_applied(command.as_std_mut(), deadline, term_grace, capture)
     }
 
     fn usage_after(&self, timed_out: bool) -> ChildUsage {

@@ -48,9 +48,14 @@ let status = cmd.status()?;
 ```
 
 `tokio::process::Command` is supported behind the `tokio` cargo feature
-(`Sandbox::apply_tokio`, `Sandbox::spawn_with_deadline_tokio`).
+(`Sandbox::apply_tokio`, `Sandbox::spawn_with_deadline_tokio`,
+`Sandbox::spawn_with_deadline_captured_tokio`).
 `Sandbox::spawn_with_deadline` kills the process group after a wall-clock
 limit (`SIGTERM`, then `SIGKILL` and `cgroup.kill`).
+`Sandbox::spawn_with_deadline_captured` keeps stdout and stderr under
+per-stream byte caps (head, tail, or both) and drains overflow so the
+child cannot fill the pipe. The tokio captured helper waits on the
+calling thread.
 
 ## Non-goals
 
