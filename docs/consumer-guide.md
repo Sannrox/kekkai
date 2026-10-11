@@ -14,6 +14,7 @@ Choose one. There is no fallback.
 | `none` | None. `health` is a warning. | Development only. |
 | `rlimit` | Unix rlimits and a new process group. No filesystem or socket rules. | Resource caps on a host that cannot run Landlock/seccomp, or as a first cut. |
 | `linux_native` | Landlock filesystem allowlist (ABI 3 floor) plus a seccomp filter that denies `socket()` when `Network::Deny`. Rlimits and a process group. | Default for untrusted children on Linux. |
+| `macos` | Seatbelt profile: filesystem allowlist and `Network::Deny` / `Allow`. Rlimits and a process group. Applied in `pre_exec`. | Default for untrusted children on macOS. |
 | `userspace` | A helper owns spawn (`Sandbox::spawn` / `Sandbox::command`). Filesystem and network policy are applied inside the helper. Requires cargo feature `guest`. | Mutually distrusting runs on one Linux host when in-process isolation is not enough. |
 
 Opt-in cgroup v2 limits (`memory.max`, `memory.high`, `pids.max`, `cpu.max`,
@@ -43,6 +44,30 @@ Call `kekkai::capabilities()` for what this process can enforce, and
 overlapping path roles, cgroup on `none`).
 
 ## What is enforced
+
+Under `macos` (macOS only):
+
+- The same named path roles as `linux_native` (`inputs`, `output` or
+  workspace, extra roots, private scratch `TMPDIR`). Paths are
+  canonicalized so Seatbelt `subpath` matches `/private/var` and
+  `/private/tmp`. The child may also read/exec `/usr/bin`, `/bin`, `/sbin`,
+  `/usr/lib`, `/usr/sbin`, `/usr/libexec`, `/usr/share`, and
+  `/System/Library` so
+  dyld and the payload can load, plus the root directory inode
+  (`literal "/"`) so the loader can stat `/`. That is not a tree grant:
+  `/usr/local`, `/Library`, `/opt`, `/private/var`, `/private/etc`, and
+  `/private/tmp` stay denied unless listed in `readable_roots` or
+  `writable_roots`. When `output` is set, the workspace is not writable.
+  System binaries under those read/exec trees can still be executed, as
+  with `linux_native` `/usr` `/bin` `/sbin`.
+- `Network::Deny` (default) denies `network*`. `Network::Allow` permits
+  sockets. `Allowlist` and `Loopback` are `Error::Invalid`.
+- Rlimits and a new process group, as on Unix `rlimit`. Extra file
+  descriptors above stderr get `FD_CLOEXEC`. Unfiltered Mach lookup is
+  not granted, so Launch Services trampolines such as `/usr/bin/open`
+  fail closed.
+- Cgroup, namespaces, filesystem view, devices, and syscall profiles
+  are `Error::Invalid`.
 
 Under `linux_native`:
 
@@ -138,8 +163,8 @@ cannot reach host interfaces or host abstract unix sockets.
   `Network::Allowlist` is proxy-mediated: IP `socket()` stays denied.
 - Scheduling, image management, or orchestration.
 - What command to run, retries, or audit logs. Those belong to the caller.
-- Real isolation on non-Linux hosts. `linux_native` and `userspace` are
-  unsupported there; `rlimit` still applies Unix resource limits.
+- Real isolation on Windows. `linux_native` and `userspace` are Linux-only;
+  `macos` is macOS-only. `rlimit` still applies Unix resource limits.
 - A KVM microVM adapter. `userspace` is the first guest backend.
 
 ## Recommended settings
@@ -173,10 +198,11 @@ omitted. `RunReport::to_json` / `from_json` round-trip. Enable the
 
 | Symptom | Cause |
 | --- | --- |
-| `Error::Unsupported` | Backend is not implemented on this OS. |
+| `Error::Unsupported` | Backend is not implemented on this OS (`linux_native` off Linux, `macos` off macOS). |
 | `Error::Unavailable` | Kernel lacks Landlock ABI 3, seccomp, a delegated cgroup v2 subtree, or a requested cgroup controller (`io`, `cpu`). |
 | `Error::Invalid` | Zero limits, relative roots, overlapping path roles, cgroup on `none`, `cpu_period_us` without quota, `cpu_weight` outside 1..=10000, empty `io.max`. |
 | Child `EACCES` / Landlock denial | Path not on the allowlist. |
+| Child `EPERM` on a path (macOS) | Seatbelt deny; path not on the allowlist. |
 | Child `EPERM` on `socket()` | `Network::Deny`, or IP sockets under `Allowlist`. |
 | Child `EPERM` on another syscall | `SyscallProfile::Strict` or `Python` does not allow that syscall. |
 | `ChildUsage.violations` with `ViolationKind::Network` | CONNECT to a host/port not on the allowlist. |

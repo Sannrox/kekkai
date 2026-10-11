@@ -1,9 +1,10 @@
-//! kekkai (結界): sandbox child processes on Linux.
+//! kekkai (結界): sandbox child processes on Linux and macOS.
 //!
-//! kekkai applies a filesystem allowlist (Landlock), a syscall and network
-//! gate (seccomp) and resource limits to a [`std::process::Command`] before it
-//! spawns. [`Backend::Userspace`] (cargo feature `guest`) launches a helper
-//! that owns spawn instead.
+//! On Linux, kekkai applies a filesystem allowlist (Landlock), a syscall and
+//! network gate (seccomp) and resource limits to a [`std::process::Command`]
+//! before it spawns. [`Backend::Macos`] applies a Seatbelt profile for
+//! filesystem and network rules. [`Backend::Userspace`] (cargo feature
+//! `guest`) launches a helper that owns spawn instead.
 //!
 //! Public enums and [`Settings`] are `#[non_exhaustive]`. Construct settings
 //! with [`Settings::builder`] so adding a field later is not a breaking change.
@@ -35,8 +36,10 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::sync::Arc;
 #[cfg(target_os = "linux")]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 mod capture;
 #[cfg(target_os = "linux")]
@@ -44,6 +47,8 @@ mod cgroup;
 mod guest;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(target_os = "linux")]
 mod notif;
 #[cfg(target_os = "linux")]
@@ -70,6 +75,8 @@ pub enum Backend {
     Rlimit,
     /// Landlock filesystem rules plus a seccomp socket gate, applied in `pre_exec`.
     LinuxNative,
+    /// Seatbelt filesystem and network profile, applied in `pre_exec` on macOS.
+    Macos,
     /// Userspace helper owns spawn. No guest kernel image. Requires the
     /// `guest` cargo feature and a helper (`Settings::guest_helper`,
     /// `KEKKAI_GUEST_HELPER`, or `kekkai-guest` on `PATH`).
@@ -82,6 +89,7 @@ impl fmt::Display for Backend {
             Backend::None => "none",
             Backend::Rlimit => "rlimit",
             Backend::LinuxNative => "linux_native",
+            Backend::Macos => "macos",
             Backend::Userspace => "userspace",
         })
     }
@@ -335,20 +343,20 @@ pub struct Limits {
 pub struct Settings {
     /// Isolation backend. Selecting one the host cannot provide is an error.
     pub backend: Backend,
-    /// Resource limits applied by `rlimit` and `linux_native`.
+    /// Resource limits applied by `rlimit`, `linux_native`, and `macos`.
     pub limits: Limits,
-    /// Read-only input paths under `linux_native`. Writes are denied.
+    /// Read-only input paths under `linux_native` and `macos`. Writes are denied.
     ///
     /// An input that is the same as, or lives under, a writable role (output,
     /// the workspace when it is the output, extra [`Self::writable_roots`],
     /// or scratch) is [`Error::Invalid`].
     pub inputs: Vec<PathBuf>,
-    /// Writable output directory under `linux_native`. `None` uses the
+    /// Writable output directory under `linux_native` and `macos`. `None` uses the
     /// workspace root passed to [`Sandbox::prepare`].
     pub output: Option<PathBuf>,
-    /// Extra absolute paths granted read and execute under `linux_native`.
+    /// Extra absolute paths granted read and execute under `linux_native` and `macos`.
     pub readable_roots: Vec<PathBuf>,
-    /// Extra absolute paths granted read and write under `linux_native`.
+    /// Extra absolute paths granted read and write under `linux_native` and `macos`.
     /// Scratch is always writable. The workspace root is writable when
     /// [`Self::output`] is `None` or names that same path.
     pub writable_roots: Vec<PathBuf>,
@@ -358,9 +366,10 @@ pub struct Settings {
     /// be device nodes at prepare. Landlock mediates open and, on ABI 5+,
     /// device ioctl.
     pub devices: Vec<PathBuf>,
-    /// Socket and network-namespace policy. `Deny`, `Allow`, and `Allowlist`
-    /// apply under `linux_native`. `Loopback` also requires isolate namespaces
-    /// on `rlimit` or `linux_native`.
+    /// Socket and network-namespace policy. `Deny` and `Allow` apply under
+    /// `linux_native` and `macos`. `Allowlist` is `linux_native` only.
+    /// `Loopback` also requires isolate namespaces on `rlimit` or
+    /// `linux_native`.
     pub network: Network,
     /// Opt-in cgroup v2 limits. Requires `rlimit` or `linux_native`.
     pub cgroup: CgroupLimits,
@@ -673,6 +682,7 @@ pub fn health(settings: &Settings) -> Health {
             }
         }
         Backend::LinuxNative => linux_native_health(settings),
+        Backend::Macos => macos_health(),
         Backend::Userspace => userspace_health(settings),
     };
     let with_cgroup = match (&backend, cgroup_health(settings)) {
@@ -899,6 +909,14 @@ fn linux_native_health(_settings: &Settings) -> Health {
     Health::Error("sandbox backend linux_native is supported only on Linux".into())
 }
 
+fn macos_health() -> Health {
+    if cfg!(target_os = "macos") {
+        Health::Ok("sandbox:   backend=macos seatbelt filesystem+network".into())
+    } else {
+        Health::Error("sandbox backend macos is supported only on macOS".into())
+    }
+}
+
 fn userspace_health(settings: &Settings) -> Health {
     #[cfg(not(feature = "guest"))]
     {
@@ -942,6 +960,8 @@ pub struct Sandbox {
     notif: Mutex<Vec<Arc<notif::ViolationCollector>>>,
     #[cfg(target_os = "linux")]
     view: Option<Arc<view::ViewPlan>>,
+    #[cfg(target_os = "macos")]
+    macos: Option<Arc<macos::MacosPrepared>>,
 }
 
 impl Sandbox {
@@ -1046,7 +1066,20 @@ impl Sandbox {
         } else {
             None
         };
-        let root = if matches!(settings.backend, Backend::Userspace) {
+        #[cfg(target_os = "macos")]
+        let macos = if matches!(settings.backend, Backend::Macos) {
+            Some(macos::prepare(
+                root,
+                &settings.inputs,
+                settings.output.as_deref(),
+                &settings.readable_roots,
+                &settings.writable_roots,
+                &settings.network,
+            )?)
+        } else {
+            None
+        };
+        let root = if matches!(settings.backend, Backend::Userspace | Backend::Macos) {
             fs::canonicalize(root).map_err(|error| {
                 Error::invalid(format!("workspace `{}`: {error}", root.display()))
             })?
@@ -1070,6 +1103,8 @@ impl Sandbox {
             notif: Mutex::new(Vec::new()),
             #[cfg(target_os = "linux")]
             view,
+            #[cfg(target_os = "macos")]
+            macos,
         })
     }
 
@@ -1090,6 +1125,7 @@ impl Sandbox {
             Backend::None => Ok(()),
             Backend::Rlimit => self.apply_rlimit(command),
             Backend::LinuxNative => self.apply_linux_native(command),
+            Backend::Macos => self.apply_macos(command),
             Backend::Userspace => Err(Error::invalid("guest backend owns spawn; apply is invalid")),
         };
         self.apply_ms
@@ -1113,7 +1149,7 @@ impl Sandbox {
             Backend::Userspace => {
                 Ok(self.wrap_guest(program, std::iter::empty::<&std::ffi::OsStr>())?)
             }
-            Backend::None | Backend::Rlimit | Backend::LinuxNative => {
+            Backend::None | Backend::Rlimit | Backend::LinuxNative | Backend::Macos => {
                 let mut command = Command::new(program);
                 self.apply(&mut command)?;
                 Ok(command)
@@ -1213,6 +1249,23 @@ impl Sandbox {
     #[cfg(target_os = "linux")]
     fn apply_linux_native(&self, command: &mut Command) -> Result<(), Error> {
         self.apply_linux_native_with(command, true, false)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn apply_macos(&self, command: &mut Command) -> Result<(), Error> {
+        let prepared = self
+            .macos
+            .as_ref()
+            .ok_or_else(|| Error::invalid("macos backend was not prepared"))?;
+        macos::apply(prepared, command, rlimit_values(&self.settings))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn apply_macos(&self, _command: &mut Command) -> Result<(), Error> {
+        Err(Error::unsupported(
+            Backend::Macos,
+            "macos is supported only on macOS",
+        ))
     }
 
     #[cfg(target_os = "linux")]
@@ -1529,7 +1582,7 @@ impl Sandbox {
         {
             let target = if matches!(
                 self.settings.backend,
-                Backend::Rlimit | Backend::LinuxNative | Backend::Userspace
+                Backend::Rlimit | Backend::LinuxNative | Backend::Macos | Backend::Userspace
             ) {
                 -(pid as libc::pid_t)
             } else {
@@ -1622,7 +1675,7 @@ impl Sandbox {
         None
     }
 
-    /// Scratch directory used as `TMPDIR` under `linux_native`.
+    /// Scratch directory used as `TMPDIR` under `linux_native` and `macos`.
     pub fn scratch_dir(&self) -> Option<&Path> {
         #[cfg(target_os = "linux")]
         {
@@ -1630,7 +1683,13 @@ impl Sandbox {
                 .as_ref()
                 .map(|prepared| prepared.scratch.as_path())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            self.macos
+                .as_ref()
+                .map(|prepared| prepared.scratch.as_path())
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             None
         }
@@ -1715,14 +1774,21 @@ fn validate(settings: &Settings) -> Result<(), Error> {
         }
     }
     let named_paths = !settings.inputs.is_empty() || settings.output.is_some();
-    if (named_paths
-        || !settings.readable_roots.is_empty()
-        || !settings.writable_roots.is_empty()
-        || !settings.devices.is_empty())
+    if !settings.devices.is_empty()
         && !matches!(settings.backend, Backend::LinuxNative | Backend::Userspace)
     {
         return Err(Error::invalid(
-            "path roles, readable_roots, writable_roots, and devices are only applied by backend linux_native or userspace",
+            "devices are only applied by backend linux_native or userspace",
+        ));
+    }
+    if (named_paths || !settings.readable_roots.is_empty() || !settings.writable_roots.is_empty())
+        && !matches!(
+            settings.backend,
+            Backend::LinuxNative | Backend::Userspace | Backend::Macos
+        )
+    {
+        return Err(Error::invalid(
+            "path roles, readable_roots, and writable_roots are only applied by backend linux_native, userspace, or macos",
         ));
     }
     if let Some(path) = &settings.guest_helper {
@@ -1765,13 +1831,13 @@ fn validate(settings: &Settings) -> Result<(), Error> {
         Vec::new()
     };
     reject_inputs_under_writables(&inputs, &named, &writable_roots)?;
-    if !settings.cgroup.is_empty() && matches!(settings.backend, Backend::None) {
+    if !settings.cgroup.is_empty() && matches!(settings.backend, Backend::None | Backend::Macos) {
         return Err(Error::invalid(
             "cgroup limits require backend rlimit or linux_native",
         ));
     }
     if matches!(settings.namespaces, Namespaces::Isolate)
-        && matches!(settings.backend, Backend::None)
+        && matches!(settings.backend, Backend::None | Backend::Macos)
     {
         return Err(Error::invalid(
             "namespace isolate requires backend rlimit or linux_native",
@@ -1781,7 +1847,7 @@ fn validate(settings: &Settings) -> Result<(), Error> {
         if matches!(settings.namespaces, Namespaces::Off) {
             return Err(Error::invalid("filesystem view requires namespace isolate"));
         }
-        if matches!(settings.backend, Backend::None) {
+        if matches!(settings.backend, Backend::None | Backend::Macos) {
             return Err(Error::invalid(
                 "filesystem view requires backend rlimit or linux_native",
             ));
@@ -1824,7 +1890,7 @@ fn validate(settings: &Settings) -> Result<(), Error> {
                     "Network::Loopback requires namespace isolate",
                 ));
             }
-            if matches!(settings.backend, Backend::None) {
+            if matches!(settings.backend, Backend::None | Backend::Macos) {
                 return Err(Error::invalid(
                     "Network::Loopback requires backend rlimit or linux_native",
                 ));
@@ -1984,6 +2050,7 @@ pub(crate) fn join_cgroup(fd: Option<i32>) -> io::Result<()> {
 fn error_from_health(backend: Backend, message: String) -> Error {
     let unsupported = match backend {
         Backend::LinuxNative | Backend::Userspace => !cfg!(target_os = "linux"),
+        Backend::Macos => !cfg!(target_os = "macos"),
         Backend::Rlimit => !cfg!(unix),
         Backend::None => false,
     };
@@ -2047,6 +2114,7 @@ mod tests {
         assert_eq!(Backend::None.to_string(), "none");
         assert_eq!(Backend::Rlimit.to_string(), "rlimit");
         assert_eq!(Backend::LinuxNative.to_string(), "linux_native");
+        assert_eq!(Backend::Macos.to_string(), "macos");
         assert_eq!(Backend::Userspace.to_string(), "userspace");
         assert_eq!(Backend::default(), Backend::None);
     }
@@ -2301,6 +2369,119 @@ mod tests {
             }
             Health::Warning(message) => {
                 panic!("linux_native must not warn: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn macos_health_matches_the_host() {
+        let settings = Settings {
+            backend: Backend::Macos,
+            ..Settings::default()
+        };
+        let report = health(&settings);
+        if cfg!(target_os = "macos") {
+            assert!(
+                matches!(report, Health::Ok(ref message) if message.contains("macos")),
+                "{report:?}"
+            );
+        } else {
+            assert!(
+                matches!(report, Health::Error(ref message) if message.contains("macOS")),
+                "{report:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_never_silently_downgrades() {
+        let settings = Settings {
+            backend: Backend::Macos,
+            ..Settings::default()
+        };
+        match health(&settings) {
+            Health::Error(_) => {
+                let error = Sandbox::prepare(&settings, ".").unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        Error::Unsupported {
+                            backend: Backend::Macos,
+                            ..
+                        } | Error::Unavailable {
+                            backend: Backend::Macos,
+                            ..
+                        }
+                    ),
+                    "{error}"
+                );
+            }
+            Health::Ok(_) => {
+                let dir = std::env::temp_dir();
+                Sandbox::prepare(&settings, &dir).unwrap();
+            }
+            Health::Warning(message) => {
+                panic!("macos must not warn: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn macos_allowlist_is_invalid() {
+        let settings = Settings {
+            backend: Backend::Macos,
+            network: Network::Allowlist(vec![AllowHost {
+                host: "example.com".into(),
+                port: Some(443),
+            }]),
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(
+            matches!(error, Error::Invalid { ref message } if message.contains("Allowlist")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn macos_devices_are_invalid() {
+        let settings = Settings {
+            backend: Backend::Macos,
+            devices: vec!["/dev/full".into()],
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(
+            matches!(error, Error::Invalid { ref message } if message.contains("devices")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn macos_path_roles_are_not_invalid() {
+        let settings = Settings {
+            backend: Backend::Macos,
+            readable_roots: vec!["/usr".into()],
+            ..Settings::default()
+        };
+        let result = Sandbox::prepare(&settings, ".");
+        if cfg!(target_os = "macos") {
+            result.expect("macos path roles must prepare on macOS");
+        } else {
+            match result {
+                Err(Error::Unsupported {
+                    backend: Backend::Macos,
+                    ..
+                })
+                | Err(Error::Unavailable {
+                    backend: Backend::Macos,
+                    ..
+                }) => {}
+                Err(Error::Invalid { message, .. }) => {
+                    panic!("macos should accept path roles: {message}");
+                }
+                Ok(_) => panic!("macos prepare must fail off macOS"),
+                Err(other) => panic!("unexpected macos path-role error: {other}"),
             }
         }
     }
