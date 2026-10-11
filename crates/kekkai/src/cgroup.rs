@@ -40,6 +40,7 @@ impl CgroupPrepared {
             memory_peak_bytes: read_u64_file(&self.dir.join("memory.peak")),
             cpu_usec: cpu_usage_usec(&self.dir),
             timed_out: false,
+            violations: Vec::new(),
         }
     }
 

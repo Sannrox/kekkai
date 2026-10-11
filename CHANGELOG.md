@@ -37,3 +37,9 @@ sandbox enforces is listed here.
 - Consumer guide (`docs/consumer-guide.md`) and `examples/` for a
   read-only Python/DuckDB transform and an agent shell with deadline
   plus output caps. CI runs `cargo build --examples`.
+- `Network::Allowlist`: the child may only create `AF_UNIX` sockets. A
+  parent CONNECT proxy on a unix socket in scratch injects `*_PROXY`
+  environment variables and permits listed hosts/ports. Direct IP
+  sockets fail. Matching is by CONNECT target, not DNS. Denied CONNECT
+  targets are recorded on `ChildUsage.violations`. Requires Landlock
+  ABI 6.
