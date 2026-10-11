@@ -31,6 +31,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
@@ -46,12 +48,14 @@ mod notif;
 mod ns;
 #[cfg(target_os = "linux")]
 mod proxy;
+mod report;
 #[cfg(target_os = "linux")]
 mod syscalls;
 #[cfg(target_os = "linux")]
 mod view;
 
 pub use capture::StreamCapture;
+pub use report::{RunReport, RunTiming, SCHEMA_VERSION, SettingsSummary};
 
 /// Isolation backend for spawned child processes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -108,8 +112,9 @@ pub struct AllowHost {
 }
 
 /// Kind of recorded sandbox denial.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
+#[serde(rename_all = "snake_case")]
 pub enum ViolationKind {
     /// The egress proxy refused a CONNECT target.
     Network,
@@ -121,7 +126,7 @@ pub enum ViolationKind {
 }
 
 /// One denial class observed for a child.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct SandboxViolation {
     /// Class of denial.
@@ -199,8 +204,9 @@ impl CgroupLimits {
 ///
 /// [`Sandbox::usage`] may be called while the child is still running.
 /// [`Sandbox::finish`] is the post-exit report and includes violations.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
+#[serde(default)]
 pub struct ChildUsage {
     /// `memory.events` `oom_kill` was non-zero.
     pub oom_killed: bool,
@@ -867,6 +873,9 @@ fn linux_native_health(_settings: &Settings) -> Health {
 #[derive(Debug)]
 pub struct Sandbox {
     settings: Settings,
+    prepared_at: Instant,
+    prepare_ms: u64,
+    apply_ms: AtomicU64,
     #[cfg(target_os = "linux")]
     linux: Option<Arc<linux::LinuxPrepared>>,
     #[cfg(target_os = "linux")]
@@ -885,7 +894,12 @@ impl Sandbox {
     /// `root` is the workspace directory. Under `linux_native` it is the
     /// writable output when [`Settings::output`] is `None`. Path roles come
     /// from [`Settings`].
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(name = "kekkai.prepare", skip_all, fields(backend = %settings.backend))
+    )]
     pub fn prepare(settings: &Settings, root: impl AsRef<Path>) -> Result<Self, Error> {
+        let started = Instant::now();
         validate(settings)?;
         check_path_roles(settings, root.as_ref())?;
         match health(settings) {
@@ -967,6 +981,9 @@ impl Sandbox {
         let _ = root;
         Ok(Self {
             settings: settings.clone(),
+            prepared_at: started,
+            prepare_ms: millis_since(started),
+            apply_ms: AtomicU64::new(0),
             #[cfg(target_os = "linux")]
             linux,
             #[cfg(target_os = "linux")]
@@ -981,12 +998,20 @@ impl Sandbox {
     }
 
     /// Install `pre_exec` hooks on a standard library command.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(name = "kekkai.apply", skip_all, fields(backend = %self.settings.backend))
+    )]
     pub fn apply(&self, command: &mut Command) -> Result<(), Error> {
-        match self.settings.backend {
+        let started = Instant::now();
+        let result = match self.settings.backend {
             Backend::None => Ok(()),
             Backend::Rlimit => self.apply_rlimit(command),
             Backend::LinuxNative => self.apply_linux_native(command),
-        }
+        };
+        self.apply_ms
+            .fetch_add(millis_since(started), Ordering::Relaxed);
+        result
     }
 
     /// Install the same hooks on a `tokio::process::Command`.
@@ -1349,7 +1374,25 @@ impl Sandbox {
         ChildUsage::default()
     }
 
+    /// Build a JSON-serializable run report (settings summary, usage, timing).
+    pub fn report(&self) -> RunReport {
+        RunReport {
+            schema_version: SCHEMA_VERSION,
+            settings: SettingsSummary::from_settings(&self.settings),
+            usage: self.finish(),
+            timing: RunTiming {
+                prepare_ms: self.prepare_ms,
+                apply_ms: self.apply_ms.load(Ordering::Relaxed),
+                since_prepare_ms: millis_since(self.prepared_at),
+            },
+        }
+    }
+
     /// Read cgroup events after the child exits. Empty when no cgroup was used.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(name = "kekkai.finish", skip_all)
+    )]
     pub fn finish(&self) -> ChildUsage {
         #[cfg(target_os = "linux")]
         {
@@ -1449,6 +1492,10 @@ fn merge_violations(into: &mut Vec<SandboxViolation>, extra: Vec<SandboxViolatio
             into.push(item);
         }
     }
+}
+
+fn millis_since(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn validate(settings: &Settings) -> Result<(), Error> {
