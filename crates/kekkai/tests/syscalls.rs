@@ -83,6 +83,16 @@ fn python3() -> Option<PathBuf> {
 }
 
 fn python_readable_roots(python: &std::path::Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    // A venv stores pyvenv.cfg in the prefix, two levels above `bin/python`.
+    if let Ok(exe) = python.canonicalize() {
+        let mut dir = exe.parent();
+        for _ in 0..2 {
+            let Some(d) = dir else { break };
+            roots.push(d.to_path_buf());
+            dir = d.parent();
+        }
+    }
     let script = "import os, sys, site\n\
 seen = []\n\
 def add(p):\n\
@@ -90,7 +100,6 @@ def add(p):\n\
         seen.append(p)\n\
 add(sys.prefix)\n\
 add(sys.exec_prefix)\n\
-add(os.path.dirname(os.path.realpath(sys.executable)))\n\
 try:\n\
     add(site.getusersitepackages())\n\
 except Exception:\n\
@@ -107,13 +116,20 @@ print('\\n'.join(seen))\n";
         .args(["-c", script])
         .output()
         .unwrap_or_else(|error| panic!("python roots: {error}"));
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute() && p.is_dir())
-        .collect()
+    assert!(
+        output.status.success(),
+        "python roots script failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    roots.extend(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute() && p.is_dir()),
+    );
+    roots
 }
 
 #[test]
