@@ -16,6 +16,14 @@ const NRS: &[(&str, u32, u32)] = &[
     ("fstatfs", 138, 44),
     ("fstat", 5, 80),
     ("lstat", 6, u32::MAX),
+    ("link", 86, u32::MAX),
+    ("linkat", 265, 37),
+    ("symlink", 88, u32::MAX),
+    ("symlinkat", 266, 36),
+    ("utimensat", 280, 88),
+    ("fadvise64", 221, 223),
+    ("times", 100, 153),
+    ("truncate", 76, 45),
     ("poll", 7, u32::MAX),
     ("lseek", 8, 62),
     ("mmap", 9, 222),
@@ -91,6 +99,9 @@ const NRS: &[(&str, u32, u32)] = &[
     ("ptrace", 101, 117),
     ("getuid", 102, 174),
     ("getgid", 104, 176),
+    ("getgroups", 115, 158),
+    ("getresuid", 118, 148),
+    ("getresgid", 120, 150),
     ("geteuid", 107, 175),
     ("getegid", 108, 177),
     ("setpgid", 109, 154),
@@ -163,6 +174,18 @@ const NRS: &[(&str, u32, u32)] = &[
     ("futex_waitv", 449, 449),
 ];
 
+/// Syscalls the child still needs after the filter is installed: `sendmsg`
+/// ships the user-notif listener to the parent, then `execve` loads the
+/// payload. Omitting them deadlocks the handshake.
+const ALWAYS: &[&str] = &[
+    "close",
+    "execve",
+    "execveat",
+    "exit",
+    "exit_group",
+    "sendmsg",
+];
+
 const STRICT: &[&str] = &[
     "arch_prctl",
     "brk",
@@ -229,6 +252,7 @@ const PYTHON: &[&str] = &[
     "exit_group",
     "faccessat",
     "faccessat2",
+    "fadvise64",
     "fallocate",
     "fchdir",
     "fchmod",
@@ -250,6 +274,9 @@ const PYTHON: &[&str] = &[
     "getegid",
     "geteuid",
     "getgid",
+    "getgroups",
+    "getresgid",
+    "getresuid",
     "getpeername",
     "getpgid",
     "getpgrp",
@@ -267,6 +294,8 @@ const PYTHON: &[&str] = &[
     "kill",
     "listen",
     "lseek",
+    "link",
+    "linkat",
     "lstat",
     "madvise",
     "membarrier",
@@ -328,12 +357,17 @@ const PYTHON: &[&str] = &[
     "stat",
     "statfs",
     "statx",
+    "symlink",
+    "symlinkat",
     "sysinfo",
+    "times",
+    "truncate",
     "tgkill",
     "umask",
     "uname",
     "unlink",
     "unlinkat",
+    "utimensat",
     "vfork",
     "wait4",
     "waitid",
@@ -368,7 +402,7 @@ pub(super) fn allowlist(profile: SyscallProfile, out: &mut [u32]) -> usize {
         SyscallProfile::Python => PYTHON,
     };
     let mut len = 0usize;
-    for name in names {
+    for name in names.iter().copied().chain(ALWAYS.iter().copied()) {
         let Some(nr) = nr_of(name) else {
             continue;
         };
@@ -455,6 +489,15 @@ mod tests {
         let strict = allowlist(SyscallProfile::Strict, &mut buf);
         assert!(strict > 8 && strict < n, "strict={strict} python={n}");
         assert_eq!(allowlist(SyscallProfile::Default, &mut buf), 0);
+        let mut nrs = [0u32; 256];
+        let n = allowlist(SyscallProfile::Strict, &mut nrs);
+        for name in ["execve", "sendmsg", "exit_group", "close"] {
+            let nr = nr_of(name).expect(name);
+            assert!(
+                nrs[..n].contains(&nr),
+                "strict allowlist missing handshake/exec {name}"
+            );
+        }
     }
 
     #[test]
