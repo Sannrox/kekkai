@@ -255,10 +255,12 @@ pub(super) fn apply(
     cgroup_procs_fd: Option<i32>,
     prepared: Arc<LinuxPrepared>,
     notif_sock: Option<RawFd>,
+    isolate: bool,
 ) -> Result<(), Error> {
     command.env("TMPDIR", &prepared.scratch);
     command.env("TMP", &prepared.scratch);
     command.env("TEMP", &prepared.scratch);
+    let abi = probe_abi().unwrap_or(MIN_ABI);
 
     // SAFETY: `pre_exec` runs between fork and exec. The closure only
     // performs async-signal-safe libc calls and does not allocate. The
@@ -269,6 +271,10 @@ pub(super) fn apply(
                 return Err(io::Error::last_os_error());
             }
             crate::join_cgroup(cgroup_procs_fd)?;
+            if isolate {
+                crate::ns::enter()?;
+                add_proc_rule(prepared.ruleset.as_raw_fd(), abi)?;
+            }
             // CLOEXEC extras before rlimits: lowering RLIMIT_NOFILE does
             // not close already-open fds, and the fallback walks 3..cur.
             close_extra_fds()?;
@@ -283,6 +289,44 @@ pub(super) fn apply(
         });
     }
     Ok(())
+}
+
+/// Grant read/execute on the remounted `/proc` inode. Landlock is inode
+/// based, so the parent's `/proc` rule would not cover a new procfs.
+fn add_proc_rule(ruleset_fd: i32, abi: u32) -> io::Result<()> {
+    let read_dir = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
+    // SAFETY: O_PATH open of `/proc` after remount; fd is closed below.
+    let fd = unsafe {
+        libc::open(
+            c"/proc".as_ptr(),
+            libc::O_PATH | libc::O_CLOEXEC | libc::O_DIRECTORY,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut attr = PathBeneathAttr {
+        allowed_access: read_dir & handled_fs(abi),
+        parent_fd: fd,
+    };
+    // SAFETY: `attr` names an O_PATH fd we own for this syscall.
+    let rc = unsafe {
+        libc::syscall(
+            SYS_landlock_add_rule,
+            ruleset_fd,
+            LANDLOCK_RULE_PATH_BENEATH,
+            std::ptr::addr_of_mut!(attr),
+            0u32,
+        )
+    };
+    unsafe {
+        libc::close(fd);
+    }
+    if rc != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Mark every descriptor above stderr CLOEXEC. Landlock does not revoke

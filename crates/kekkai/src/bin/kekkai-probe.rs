@@ -2,6 +2,7 @@
 
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn mmap_va(n: usize) -> ExitCode {
@@ -481,6 +482,86 @@ fn main() -> ExitCode {
             {
                 let _ = name;
                 eprintln!("connect-abstract requires Linux");
+                ExitCode::from(2)
+            }
+        }
+        "pid" => {
+            println!("{}", std::process::id());
+            ExitCode::SUCCESS
+        }
+        "pause" => {
+            #[cfg(unix)]
+            {
+                loop {
+                    unsafe {
+                        libc::pause();
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("pause requires Unix");
+                ExitCode::from(2)
+            }
+        }
+        "raise-as" => {
+            #[cfg(unix)]
+            {
+                let lim = libc::rlimit {
+                    rlim_cur: libc::RLIM_INFINITY,
+                    rlim_max: libc::RLIM_INFINITY,
+                };
+                // SAFETY: raise RLIMIT_AS to infinity if the child still can.
+                if unsafe { libc::setrlimit(libc::RLIMIT_AS, &lim) } == 0 {
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!("raise-as: {}", std::io::Error::last_os_error());
+                    ExitCode::FAILURE
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("raise-as requires Unix");
+                ExitCode::from(2)
+            }
+        }
+        "proc-exists" => {
+            let Some(pid) = args.next() else {
+                return ExitCode::from(2);
+            };
+            if PathBuf::from(format!("/proc/{pid}")).exists() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("proc-exists {pid}: missing");
+                ExitCode::FAILURE
+            }
+        }
+        "shm-open" => {
+            let Some(name) = args.next() else {
+                return ExitCode::from(2);
+            };
+            #[cfg(target_os = "linux")]
+            {
+                let c_name = match std::ffi::CString::new(name.as_str()) {
+                    Ok(value) => value,
+                    Err(_) => return ExitCode::from(2),
+                };
+                // SAFETY: `c_name` is a valid C string; O_RDWR without CREAT.
+                let fd = unsafe { libc::shm_open(c_name.as_ptr(), libc::O_RDWR, 0o600) };
+                if fd < 0 {
+                    eprintln!("shm-open {name}: {}", std::io::Error::last_os_error());
+                    ExitCode::FAILURE
+                } else {
+                    unsafe {
+                        libc::close(fd);
+                    }
+                    ExitCode::SUCCESS
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = name;
+                eprintln!("shm-open requires Linux");
                 ExitCode::from(2)
             }
         }
