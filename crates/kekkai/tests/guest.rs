@@ -190,24 +190,51 @@ fn spawn_with_deadline_forwards_env_and_cwd() {
     };
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
     fs::write(workspace.join("cwd-marker"), "ok").unwrap();
-    let mut command = Command::new("/bin/sh");
-    command.args([
-        "-c",
-        "test \"$KEKKAI_TEST_GUEST_ENV\" = copied && test -f cwd-marker",
-    ]);
-    command.env("KEKKAI_TEST_GUEST_ENV", "copied");
-    command.current_dir(&workspace);
-    let (status, _usage) = sandbox
-        .spawn_with_deadline(
-            &mut command,
+
+    let mut cwd = Command::new(probe_exe());
+    cwd.args(["read", "cwd-marker"]);
+    cwd.current_dir(&workspace);
+    let (status, _usage, stdout, stderr) = sandbox
+        .spawn_with_deadline_captured(
+            &mut cwd,
             Duration::from_secs(5),
             Duration::from_millis(50),
+            CaptureLimits {
+                stdout_max: Some(64),
+                stderr_max: Some(256),
+                keep: CaptureKeep::Head,
+            },
         )
-        .expect("deadline spawn");
+        .expect("cwd spawn");
     assert!(
         status.success(),
-        "guest wrap dropped env or cwd before the helper spawned"
+        "guest wrap dropped cwd: stderr={}",
+        String::from_utf8_lossy(&stderr.bytes)
     );
+    assert_eq!(stdout.bytes, b"ok");
+
+    let mut env_cmd = Command::new(probe_exe());
+    env_cmd.args(["env", "KEKKAI_TEST_GUEST_ENV"]);
+    env_cmd.env("KEKKAI_TEST_GUEST_ENV", "copied");
+    env_cmd.current_dir(&workspace);
+    let (status, _usage, stdout, stderr) = sandbox
+        .spawn_with_deadline_captured(
+            &mut env_cmd,
+            Duration::from_secs(5),
+            Duration::from_millis(50),
+            CaptureLimits {
+                stdout_max: Some(64),
+                stderr_max: Some(256),
+                keep: CaptureKeep::Head,
+            },
+        )
+        .expect("env spawn");
+    assert!(
+        status.success(),
+        "guest wrap dropped env: stderr={}",
+        String::from_utf8_lossy(&stderr.bytes)
+    );
+    assert_eq!(stdout.bytes, b"copied\n");
 }
 
 #[test]

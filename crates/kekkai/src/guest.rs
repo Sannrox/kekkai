@@ -160,16 +160,21 @@ pub(crate) fn wrap_into_command(
             .collect::<Result<Vec<_>, _>>()?;
         let mut ptrs: Vec<usize> = cstrings.iter().map(|s| s.as_ptr() as usize).collect();
         ptrs.push(0);
+        // `Command.env*` is applied to execve's envp after `pre_exec`, so
+        // `execv` would drop those overrides. Snapshot them here.
+        let env_cstrings = command_env_cstrings(command)?;
+        let mut env_ptrs: Vec<usize> = env_cstrings.iter().map(|s| s.as_ptr() as usize).collect();
+        env_ptrs.push(0);
         command.process_group(0);
-        // SAFETY: `pre_exec` runs after fork. `execv` is async-signal-safe and
-        // uses the environment the standard library already installed.
-        // `ptrs` stores addresses of `cstrings`, which the closure owns.
+        // SAFETY: `pre_exec` runs after fork. `execve` is async-signal-safe.
+        // `ptrs` / `env_ptrs` store addresses of the CStrings the closure owns.
         unsafe {
             command.pre_exec(move || {
-                let _keep = &cstrings;
-                libc::execv(
+                let _keep = (&cstrings, &env_cstrings);
+                libc::execve(
                     ptrs[0] as *const libc::c_char,
                     ptrs.as_ptr() as *const *const libc::c_char,
+                    env_ptrs.as_ptr() as *const *const libc::c_char,
                 );
                 Err(std::io::Error::last_os_error())
             });
@@ -185,6 +190,36 @@ pub(crate) fn wrap_into_command(
             "guest helper wrap requires Unix",
         ))
     }
+}
+
+#[cfg(unix)]
+fn command_env_cstrings(command: &Command) -> Result<Vec<std::ffi::CString>, Error> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut pairs: Vec<(OsString, OsString)> = env::vars_os().collect();
+    for (key, value) in command.get_envs() {
+        match value {
+            Some(value) => {
+                if let Some(slot) = pairs.iter_mut().find(|(k, _)| k == key) {
+                    slot.1 = value.to_os_string();
+                } else {
+                    pairs.push((key.to_os_string(), value.to_os_string()));
+                }
+            }
+            None => pairs.retain(|(k, _)| k != key),
+        }
+    }
+    pairs
+        .into_iter()
+        .map(|(key, value)| {
+            let mut bytes = key.as_bytes().to_vec();
+            bytes.push(b'=');
+            bytes.extend_from_slice(value.as_bytes());
+            CString::new(bytes)
+                .map_err(|_| Error::invalid("guest helper environment contains an interior NUL"))
+        })
+        .collect()
 }
 
 pub(crate) fn missing_helper_error(message: String) -> Error {
@@ -377,6 +412,38 @@ mod tests {
                 .any(|pair| pair[0] == "--memory-mb" && pair[1] == "64"),
             "{args:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_env_cstrings_applies_overrides_and_removals() {
+        // SAFETY: test-only process env so env_remove is observable.
+        unsafe {
+            env::set_var("KEKKAI_TEST_GUEST_REMOVED", "gone");
+        }
+        let mut original = Command::new("true");
+        original.env("KEKKAI_TEST_GUEST_ENV", "copied");
+        original.env_remove("KEKKAI_TEST_GUEST_REMOVED");
+        let pairs = command_env_cstrings(&original).expect("envp");
+        let rendered: Vec<String> = pairs
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|entry| entry == "KEKKAI_TEST_GUEST_ENV=copied"),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered
+                .iter()
+                .all(|entry| !entry.starts_with("KEKKAI_TEST_GUEST_REMOVED=")),
+            "{rendered:?}"
+        );
+        unsafe {
+            env::remove_var("KEKKAI_TEST_GUEST_REMOVED");
+        }
     }
 
     #[test]
