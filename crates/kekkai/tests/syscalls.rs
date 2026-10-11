@@ -84,13 +84,22 @@ fn python3() -> Option<PathBuf> {
 
 fn python_readable_roots(python: &std::path::Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    // A venv stores pyvenv.cfg in the prefix, two levels above `bin/python`.
-    if let Ok(exe) = python.canonicalize() {
-        let mut dir = exe.parent();
-        for _ in 0..2 {
-            let Some(d) = dir else { break };
-            roots.push(d.to_path_buf());
-            dir = d.parent();
+    // Do not canonicalize: a venv `bin/python` is a symlink to the system
+    // interpreter, and pyvenv.cfg lives in the venv prefix.
+    let mut dir = python.parent();
+    for _ in 0..2 {
+        let Some(d) = dir else { break };
+        roots.push(d.to_path_buf());
+        dir = d.parent();
+    }
+    if let Ok(output) = Command::new(python)
+        .args(["-c", "import sys; print(sys.prefix)"])
+        .output()
+        && output.status.success()
+    {
+        let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !prefix.is_empty() {
+            roots.push(PathBuf::from(prefix));
         }
     }
     roots
