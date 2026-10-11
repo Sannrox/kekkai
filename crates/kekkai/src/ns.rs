@@ -124,11 +124,8 @@ fn bring_lo_up() -> io::Result<()> {
         }
         return Err(io::Error::from_raw_os_error(libc::EBUSY));
     }
-    // SAFETY: writing flags back into the same `ifreq` for SIOCSIFFLAGS.
-    unsafe {
-        req.ifr_ifru.ifru_flags =
-            flags | libc::IFF_UP as libc::c_short | libc::IFF_RUNNING as libc::c_short;
-    }
+    req.ifr_ifru.ifru_flags =
+        flags | libc::IFF_UP as libc::c_short | libc::IFF_RUNNING as libc::c_short;
     // SAFETY: `req` holds the flags to apply on `lo`.
     if unsafe { libc::ioctl(fd, libc::SIOCSIFFLAGS, std::ptr::addr_of_mut!(req)) } != 0 {
         let err = io::Error::last_os_error();
