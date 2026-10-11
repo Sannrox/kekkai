@@ -13,6 +13,13 @@ sandbox enforces is listed here.
   `Sandbox::prepare` out, `apply` on `std::process::Command` before spawn.
 - Landlock filesystem allowlist with ABI 3 as the floor, a seccomp socket
   gate when `Network::Deny`, rlimits, and a child process group.
+- Sandbox overhead benches (`cargo bench --bench overhead`): `prepare` +
+  `apply` + spawn `/bin/true` + `finish` for each backend and opt-in
+  feature, with p50/p95/p99 and sequential/parallel jobs per second. A
+  scheduled Linux job fails when p95 exceeds 20% of the checked-in
+  runner baseline. Published budgets: `rlimit` ≤ 2 ms p95 overhead,
+  `linux_native` with namespaces + filesystem view + cgroup ≤ 25 ms,
+  `linux_native` ≥ 50 sequential jobs/s.
 - Explicit device grants (`Settings.devices`): extra character or block
   device nodes under `linux_native` / `userspace`. Default is none beyond
   `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/random`. Missing

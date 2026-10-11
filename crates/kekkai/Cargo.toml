@@ -28,6 +28,10 @@ doc = false
 test = false
 bench = false
 
+[[bench]]
+name = "overhead"
+harness = false
+
 [[example]]
 name = "transform"
 path = "../../examples/transform.rs"
