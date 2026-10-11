@@ -115,9 +115,14 @@ not a breaking change on that path. The crate denies missing docs
 cargo build
 cargo build --examples
 cargo test
+cargo bench --bench overhead
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+`cargo bench --bench overhead` times `prepare` / `apply` / spawn of
+`/bin/true` / `finish`. The Linux x86_64 baseline and 20% p95 gate live
+in [`crates/kekkai/benches/`](crates/kekkai/benches/).
 
 The toolchain is pinned in `rust-toolchain.toml`.
 

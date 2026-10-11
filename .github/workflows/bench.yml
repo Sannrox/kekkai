@@ -1,0 +1,27 @@
+name: Bench
+
+on:
+  pull_request:
+  schedule:
+    - cron: "12 5 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  overhead:
+    name: Sandbox overhead
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Measure prepare/apply/spawn/finish
+        run: |
+          cargo bench --locked --bench overhead -- \
+            --json \
+            --check crates/kekkai/benches/baseline-linux-x86_64.json

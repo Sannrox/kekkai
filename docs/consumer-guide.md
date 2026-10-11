@@ -191,3 +191,12 @@ Denial tests in `crates/kekkai/tests/` spawn `kekkai-probe` through
 an explicit `skip:` message; they never pass vacuously. The escape
 suite (`tests/escape.rs`) and optional fuzz job are described in
 [SECURITY.md](../SECURITY.md).
+
+`cargo bench --bench overhead` measures per-job `prepare` / `apply` /
+spawn `/bin/true` / `finish` cost for each backend and opt-in feature.
+A scheduled Linux job compares p95 against
+`crates/kekkai/benches/baseline-linux-x86_64.json` and fails on a >20%
+regression. Published budgets: `rlimit` ≤ 2 ms p95 over unsandboxed
+spawn; `linux_native` with isolate namespaces, filesystem view, and
+cgroup ≤ 25 ms; `linux_native` ≥ 50 sequential jobs/s. Scenarios the
+host cannot enforce print `skip:` and are omitted.
