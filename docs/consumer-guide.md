@@ -62,6 +62,10 @@ Under `linux_native`:
   fails at `socket()`. CONNECT matching is the target string, not DNS.
   Requires Landlock ABI 6 (abstract unix scoping). Denied CONNECT
   targets appear in `ChildUsage.violations`.
+  `Network::Loopback` (requires isolate namespaces) puts the child in a
+  private network namespace with only loopback up. Host routes and host
+  abstract unix sockets are gone. Missing netns support is
+  `Error::Unavailable`.
 - Rlimits from `Settings.limits` are installed in `pre_exec`.
 - The child is placed in its own process group so timeout and shutdown
   can signal the whole group.
@@ -103,6 +107,10 @@ inputs read-only, puts scratch on tmpfs, and overlays the output tree.
 `OverlayPersist::Discard` throws those writes away with the namespace;
 `Keep(path)` stores them under `path/upper`. After pivot, paths outside
 the view are gone (`ENOENT`), not merely denied.
+
+`Network::Loopback` (requires isolate namespaces) unshares a network
+namespace and brings loopback up. The child can use `127.0.0.1`; it
+cannot reach host interfaces or host abstract unix sockets.
 
 `pre_exec` code is async-signal-safe: no allocation, locks, or logging.
 

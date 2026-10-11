@@ -72,6 +72,10 @@ sandbox enforces is listed here.
   tree (`OverlayPersist::Discard` or `Keep`), then a new root so paths
   outside the view do not exist. Missing overlay or pivot support is
   `Error::Unavailable`.
+- Opt-in `Network::Loopback` (requires `Namespaces::Isolate`): the child
+  runs in a private network namespace with only loopback up. External
+  routes and host abstract unix sockets are unreachable. Missing netns
+  support is `Error::Unavailable`.
 
 ### Changed
 
