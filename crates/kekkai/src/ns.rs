@@ -14,6 +14,7 @@ use crate::{Backend, Error};
 /// True when this process can create an unprivileged user namespace and
 /// the rest of the isolate set.
 pub(super) fn probe() -> Result<(), Error> {
+    crate::probe_stats::inc_namespaces();
     let mut command = Command::new("true");
     // SAFETY: probe child only; `enter` is async-signal-safe.
     unsafe {
@@ -76,6 +77,7 @@ pub(super) fn enter_with_view(
 /// True when isolate namespaces plus a private network namespace with
 /// loopback can be created.
 pub(super) fn probe_loopback() -> Result<(), Error> {
+    crate::probe_stats::inc_loopback();
     let mut command = Command::new("true");
     // SAFETY: probe child only; enter_with_view is async-signal-safe.
     unsafe {

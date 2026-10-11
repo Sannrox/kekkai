@@ -9,7 +9,8 @@
 //! Public enums and [`Settings`] are `#[non_exhaustive]`. Construct settings
 //! with [`Settings::builder`] so adding a field later is not a breaking change.
 //! A change to what the sandbox allows or denies is a versioned change, never
-//! a patch-level surprise.
+//! a patch-level surprise. A runner that prepares many jobs can
+//! [`Host::probe`] once and call [`Sandbox::prepare_with_host`].
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -506,6 +507,69 @@ pub enum Health {
     Error(String),
 }
 
+/// Reusable snapshot of host kernel capabilities.
+///
+/// Probe once with [`Host::probe`], then pass the same value to
+/// [`Sandbox::prepare_with_host`] for many jobs. [`Host::refresh`] repeats
+/// the probes. A stale snapshot fails prepare or apply; it never weakens
+/// isolation.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct Host {
+    capabilities: Capabilities,
+    #[cfg(target_os = "linux")]
+    cgroup_parent: Option<PathBuf>,
+    #[cfg(target_os = "linux")]
+    landlock_enforced_abi: Option<u32>,
+}
+
+impl Host {
+    /// Probe this process once (cgroup writes, namespace and Landlock children).
+    pub fn probe() -> Self {
+        let capabilities = probe_capabilities();
+        #[cfg(target_os = "linux")]
+        let cgroup_parent = if capabilities.cgroup {
+            cgroup::probe(None).ok()
+        } else {
+            None
+        };
+        #[cfg(target_os = "linux")]
+        let landlock_enforced_abi = linux::probe_enforcement().ok();
+        Self {
+            capabilities,
+            #[cfg(target_os = "linux")]
+            cgroup_parent,
+            #[cfg(target_os = "linux")]
+            landlock_enforced_abi,
+        }
+    }
+
+    /// Repeat the probes and replace this snapshot.
+    pub fn refresh(&mut self) {
+        *self = Self::probe();
+    }
+
+    /// Capabilities recorded when this snapshot was taken.
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.capabilities
+    }
+
+    /// Health of `settings` against this snapshot, without re-probing.
+    pub fn health(&self, settings: &Settings) -> Health {
+        health_inner(settings, Some(self))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cached_cgroup_parent(&self, requested: Option<&Path>) -> Option<&Path> {
+        let parent = self.cgroup_parent.as_deref()?;
+        match requested {
+            None => Some(parent),
+            Some(want) if want == parent => Some(parent),
+            Some(_) => None,
+        }
+    }
+}
+
 /// Host kernel capabilities that affect backend selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -616,6 +680,10 @@ impl From<Error> for io::Error {
 
 /// Probe which backends this process can enforce.
 pub fn capabilities() -> Capabilities {
+    probe_capabilities()
+}
+
+fn probe_capabilities() -> Capabilities {
     #[cfg(unix)]
     let rlimit = true;
     #[cfg(not(unix))]
@@ -665,6 +733,10 @@ pub fn capabilities() -> Capabilities {
 
 /// Probe the configured backend without constructing a run-scoped ruleset.
 pub fn health(settings: &Settings) -> Health {
+    health_inner(settings, None)
+}
+
+fn health_inner(settings: &Settings, host: Option<&Host>) -> Health {
     let backend = match settings.backend {
         Backend::None => {
             Health::Warning("sandbox:   backend=none — no OS isolation for child processes".into())
@@ -681,11 +753,11 @@ pub fn health(settings: &Settings) -> Health {
                 Health::Error("sandbox backend rlimit is supported only on Unix".into())
             }
         }
-        Backend::LinuxNative => linux_native_health(settings),
+        Backend::LinuxNative => linux_native_health(settings, host),
         Backend::Macos => macos_health(),
-        Backend::Userspace => userspace_health(settings),
+        Backend::Userspace => userspace_health(settings, host),
     };
-    let with_cgroup = match (&backend, cgroup_health(settings)) {
+    let with_cgroup = match (&backend, cgroup_health(settings, host)) {
         (_, Some(Health::Error(message))) => Health::Error(message),
         (Health::Error(_), _) => backend,
         (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
@@ -694,7 +766,7 @@ pub fn health(settings: &Settings) -> Health {
         }
         _ => backend,
     };
-    let with_ns = match (&with_cgroup, namespace_health(settings)) {
+    let with_ns = match (&with_cgroup, namespace_health(settings, host)) {
         (_, Some(Health::Error(message))) => Health::Error(message),
         (Health::Error(_), _) => with_cgroup,
         (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
@@ -703,7 +775,7 @@ pub fn health(settings: &Settings) -> Health {
         }
         _ => with_cgroup,
     };
-    let with_view = match (&with_ns, view_health(settings)) {
+    let with_view = match (&with_ns, view_health(settings, host)) {
         (_, Some(Health::Error(message))) => Health::Error(message),
         (Health::Error(_), _) => with_ns,
         (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
@@ -712,7 +784,7 @@ pub fn health(settings: &Settings) -> Health {
         }
         _ => with_ns,
     };
-    match (&with_view, loopback_health(settings)) {
+    match (&with_view, loopback_health(settings, host)) {
         (_, Some(Health::Error(message))) => Health::Error(message),
         (Health::Error(_), _) => with_view,
         (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
@@ -723,7 +795,7 @@ pub fn health(settings: &Settings) -> Health {
     }
 }
 
-fn namespace_health(settings: &Settings) -> Option<Health> {
+fn namespace_health(settings: &Settings, host: Option<&Host>) -> Option<Health> {
     if matches!(settings.namespaces, Namespaces::Off) {
         return None;
     }
@@ -734,6 +806,13 @@ fn namespace_health(settings: &Settings) -> Option<Health> {
     }
     #[cfg(target_os = "linux")]
     {
+        if let Some(host) = host {
+            return Some(if host.capabilities.user_namespaces {
+                Health::Ok("namespaces=isolate pid+mount+ipc+uts".into())
+            } else {
+                Health::Error("namespace isolate is unavailable on this host (cached probe)".into())
+            });
+        }
         Some(match ns::probe() {
             Ok(()) => Health::Ok("namespaces=isolate pid+mount+ipc+uts".into()),
             Err(error) => Health::Error(error.to_string()),
@@ -741,13 +820,14 @@ fn namespace_health(settings: &Settings) -> Option<Health> {
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = host;
         Some(Health::Error(
             "namespace isolate is supported only on Linux".into(),
         ))
     }
 }
 
-fn view_health(settings: &Settings) -> Option<Health> {
+fn view_health(settings: &Settings, host: Option<&Host>) -> Option<Health> {
     if matches!(settings.filesystem_view, FilesystemView::Host) {
         return None;
     }
@@ -763,6 +843,20 @@ fn view_health(settings: &Settings) -> Option<Health> {
     }
     #[cfg(target_os = "linux")]
     {
+        if let Some(host) = host {
+            return Some(if host.capabilities.filesystem_view {
+                let overlay = match &settings.filesystem_view {
+                    FilesystemView::Isolate { overlay } => match overlay {
+                        OverlayPersist::Discard => "discard",
+                        OverlayPersist::Keep(_) => "keep",
+                    },
+                    FilesystemView::Host => "host",
+                };
+                Health::Ok(format!("view=isolate overlay={overlay} ro-bind tmpfs"))
+            } else {
+                Health::Error("filesystem view is unavailable on this host (cached probe)".into())
+            });
+        }
         Some(match view::probe() {
             Ok(()) => {
                 let overlay = match &settings.filesystem_view {
@@ -779,13 +873,14 @@ fn view_health(settings: &Settings) -> Option<Health> {
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = host;
         Some(Health::Error(
             "filesystem view is supported only on Linux".into(),
         ))
     }
 }
 
-fn loopback_health(settings: &Settings) -> Option<Health> {
+fn loopback_health(settings: &Settings, host: Option<&Host>) -> Option<Health> {
     if !matches!(settings.network, Network::Loopback) {
         return None;
     }
@@ -801,6 +896,13 @@ fn loopback_health(settings: &Settings) -> Option<Health> {
     }
     #[cfg(target_os = "linux")]
     {
+        if let Some(host) = host {
+            return Some(if host.capabilities.network_namespace {
+                Health::Ok("netns=loopback".into())
+            } else {
+                Health::Error("Network::Loopback is unavailable on this host (cached probe)".into())
+            });
+        }
         Some(match ns::probe_loopback() {
             Ok(()) => Health::Ok("netns=loopback".into()),
             Err(error) => Health::Error(error.to_string()),
@@ -808,13 +910,14 @@ fn loopback_health(settings: &Settings) -> Option<Health> {
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = host;
         Some(Health::Error(
             "Network::Loopback is supported only on Linux".into(),
         ))
     }
 }
 
-fn cgroup_health(settings: &Settings) -> Option<Health> {
+fn cgroup_health(settings: &Settings, host: Option<&Host>) -> Option<Health> {
     if settings.cgroup.is_empty() {
         return None;
     }
@@ -825,6 +928,34 @@ fn cgroup_health(settings: &Settings) -> Option<Health> {
     }
     #[cfg(target_os = "linux")]
     {
+        if let Some(host) = host {
+            if let Some(path) = host.cached_cgroup_parent(settings.cgroup_root.as_deref()) {
+                if let Err(error) =
+                    cgroup::cached_parent_supports(settings.backend, path, &settings.cgroup)
+                {
+                    return Some(Health::Error(error.to_string()));
+                }
+                return Some(Health::Ok(format!(
+                    "cgroup=v2 root={} memory_max={:?} pids_max={:?} cpu_quota_us={:?} cpu_weight={:?} io_max={}",
+                    path.display(),
+                    settings.cgroup.memory_max,
+                    settings.cgroup.pids_max,
+                    settings.cgroup.cpu_quota_us,
+                    settings.cgroup.cpu_weight,
+                    match settings.cgroup.io_max {
+                        Some(_) => "set",
+                        None => "none",
+                    }
+                )));
+            }
+            // A custom cgroup_root is a cache miss: probe that path. Only the
+            // default subtree can be rejected from the snapshot flag.
+            if settings.cgroup_root.is_none() && !host.capabilities.cgroup {
+                return Some(Health::Error(
+                    "cgroup v2 limits are unavailable on this host (cached probe)".into(),
+                ));
+            }
+        }
         Some(
             match cgroup::probe_with(
                 settings.backend,
@@ -849,6 +980,7 @@ fn cgroup_health(settings: &Settings) -> Option<Health> {
     }
     #[cfg(not(target_os = "linux"))]
     {
+        let _ = host;
         Some(Health::Error(
             "cgroup v2 limits are supported only on Linux".into(),
         ))
@@ -865,8 +997,18 @@ fn syscall_profile_label(profile: SyscallProfile) -> &'static str {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_native_health(settings: &Settings) -> Health {
-    match linux::probe_enforcement() {
+fn linux_native_health(settings: &Settings, host: Option<&Host>) -> Health {
+    let abi = if let Some(host) = host {
+        match host.landlock_enforced_abi {
+            Some(abi) => Ok(abi),
+            None => Err(
+                "sandbox backend linux_native is unavailable on this host (cached probe)".into(),
+            ),
+        }
+    } else {
+        linux::probe_enforcement().map_err(|error| error.to_string())
+    };
+    match abi {
         Ok(abi) => {
             let signal = if abi >= 6 { "landlock" } else { "none" };
             if matches!(settings.network, Network::Allowlist(_)) && abi < 6 {
@@ -883,7 +1025,13 @@ fn linux_native_health(settings: &Settings) -> Health {
                 }
                 Network::Loopback => "loopback".to_string(),
             };
-            let violations = if notif::probe_user_notif() {
+            let violations = if let Some(host) = host {
+                if host.capabilities.seccomp_user_notif {
+                    "user_notif"
+                } else {
+                    "unavailable"
+                }
+            } else if notif::probe_user_notif() {
                 "user_notif"
             } else {
                 "unavailable"
@@ -900,12 +1048,12 @@ fn linux_native_health(settings: &Settings) -> Health {
                 settings.limits.user_processes
             ))
         }
-        Err(error) => Health::Error(error.to_string()),
+        Err(message) => Health::Error(message),
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn linux_native_health(_settings: &Settings) -> Health {
+fn linux_native_health(_settings: &Settings, _host: Option<&Host>) -> Health {
     Health::Error("sandbox backend linux_native is supported only on Linux".into())
 }
 
@@ -917,10 +1065,10 @@ fn macos_health() -> Health {
     }
 }
 
-fn userspace_health(settings: &Settings) -> Health {
+fn userspace_health(settings: &Settings, host: Option<&Host>) -> Health {
     #[cfg(not(feature = "guest"))]
     {
-        let _ = settings;
+        let _ = (settings, host);
         Health::Error("sandbox backend userspace requires cargo feature guest".into())
     }
     #[cfg(feature = "guest")]
@@ -930,7 +1078,7 @@ fn userspace_health(settings: &Settings) -> Health {
         }
         match guest::resolve_helper(settings) {
             Err(message) => Health::Error(message),
-            Ok(path) => match linux_native_health(settings) {
+            Ok(path) => match linux_native_health(settings, host) {
                 Health::Error(message) => Health::Error(message),
                 Health::Ok(_) | Health::Warning(_) => Health::Ok(format!(
                     "sandbox:   backend=userspace helper={}",
@@ -974,18 +1122,41 @@ impl Sandbox {
         #[cfg(feature = "tracing")]
         {
             tracing::info_span!("kekkai.prepare", backend = %settings.backend)
-                .in_scope(|| Self::prepare_inner(settings, root))
+                .in_scope(|| Self::prepare_inner(settings, root, None))
         }
         #[cfg(not(feature = "tracing"))]
-        Self::prepare_inner(settings, root)
+        Self::prepare_inner(settings, root, None)
     }
 
-    fn prepare_inner(settings: &Settings, root: impl AsRef<Path>) -> Result<Self, Error> {
+    /// Prepare using a previously probed [`Host`].
+    ///
+    /// Skips cgroup, namespace, filesystem-view, loopback, and Landlock
+    /// child probes. Isolation is still installed in `apply`; a stale
+    /// snapshot fails closed.
+    pub fn prepare_with_host(
+        host: &Host,
+        settings: &Settings,
+        root: impl AsRef<Path>,
+    ) -> Result<Self, Error> {
+        #[cfg(feature = "tracing")]
+        {
+            tracing::info_span!("kekkai.prepare", backend = %settings.backend)
+                .in_scope(|| Self::prepare_inner(settings, root, Some(host)))
+        }
+        #[cfg(not(feature = "tracing"))]
+        Self::prepare_inner(settings, root, Some(host))
+    }
+
+    fn prepare_inner(
+        settings: &Settings,
+        root: impl AsRef<Path>,
+        host: Option<&Host>,
+    ) -> Result<Self, Error> {
         let started = Instant::now();
         let root = root.as_ref();
         validate(settings)?;
         check_path_roles(settings, root)?;
-        match health(settings) {
+        match health_inner(settings, host) {
             Health::Error(message) => return Err(error_from_health(settings.backend, message)),
             Health::Ok(_) | Health::Warning(_) => {}
         }
@@ -1006,10 +1177,13 @@ impl Sandbox {
         let cgroup = if settings.cgroup.is_empty() {
             None
         } else {
+            let cached_parent =
+                host.and_then(|host| host.cached_cgroup_parent(settings.cgroup_root.as_deref()));
             Some(Arc::new(cgroup::prepare(
                 settings.backend,
                 &settings.cgroup,
                 settings.cgroup_root.as_deref(),
+                cached_parent,
             )?))
         };
         #[cfg(target_os = "linux")]
@@ -2105,6 +2279,53 @@ type RlimitResource = libc::c_uint;
 #[cfg(all(unix, not(target_os = "linux")))]
 type RlimitResource = libc::c_int;
 
+/// Per-thread counters so tests can assert cached prepare skips host probes.
+/// Thread-local so parallel `cargo test` threads cannot move another test's
+/// snapshot. Increments live in Linux probe paths; other hosts keep the
+/// symbols so lib tests compile.
+#[allow(dead_code, missing_docs)]
+pub(crate) mod probe_stats {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CGROUP: Cell<u64> = const { Cell::new(0) };
+        static NAMESPACES: Cell<u64> = const { Cell::new(0) };
+        static VIEW: Cell<u64> = const { Cell::new(0) };
+        static LOOPBACK: Cell<u64> = const { Cell::new(0) };
+        static LANDLOCK_CHILD: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub fn inc_cgroup() {
+        CGROUP.with(|cell| cell.set(cell.get() + 1));
+    }
+
+    pub fn inc_namespaces() {
+        NAMESPACES.with(|cell| cell.set(cell.get() + 1));
+    }
+
+    pub fn inc_view() {
+        VIEW.with(|cell| cell.set(cell.get() + 1));
+    }
+
+    pub fn inc_loopback() {
+        LOOPBACK.with(|cell| cell.set(cell.get() + 1));
+    }
+
+    pub fn inc_landlock_child() {
+        LANDLOCK_CHILD.with(|cell| cell.set(cell.get() + 1));
+    }
+
+    pub fn snapshot() -> [u64; 5] {
+        [
+            CGROUP.with(Cell::get),
+            NAMESPACES.with(Cell::get),
+            VIEW.with(Cell::get),
+            LOOPBACK.with(Cell::get),
+            LANDLOCK_CHILD.with(Cell::get),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2153,6 +2374,100 @@ mod tests {
         let mut command = Command::new("true");
         sandbox.apply(&mut command).unwrap();
         assert!(sandbox.scratch_dir().is_none());
+    }
+
+    #[test]
+    fn prepare_with_host_skips_probe_writes_and_forks() {
+        let host = Host::probe();
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("ws");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut settings = Settings::builder().backend(Backend::None).build();
+        if cfg!(target_os = "linux") {
+            settings.backend = Backend::LinuxNative;
+            if host.capabilities.cgroup {
+                settings.cgroup.memory_max = Some(64 * 1024 * 1024);
+            }
+            if host.capabilities.user_namespaces {
+                settings.namespaces = Namespaces::Isolate;
+            }
+            if host.capabilities.filesystem_view {
+                settings.filesystem_view = FilesystemView::Isolate {
+                    overlay: OverlayPersist::Discard,
+                };
+            }
+            if host.capabilities.network_namespace {
+                settings.network = Network::Loopback;
+            }
+        } else if cfg!(target_os = "macos") {
+            settings.backend = Backend::Macos;
+        }
+        let before = probe_stats::snapshot();
+        match host.health(&settings) {
+            Health::Ok(_) | Health::Warning(_) => {
+                Sandbox::prepare_with_host(&host, &settings, &workspace)
+                    .expect("prepare_with_host");
+                assert_eq!(
+                    probe_stats::snapshot(),
+                    before,
+                    "cached host must not re-probe cgroup, namespaces, view, loopback, or Landlock children"
+                );
+            }
+            Health::Error(message) => {
+                eprintln!("skip: native backend unavailable: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn custom_cgroup_root_is_probed_when_default_cache_is_empty() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let mut host = Host::probe();
+        host.capabilities.cgroup = false;
+        #[cfg(target_os = "linux")]
+        {
+            host.cgroup_parent = None;
+        }
+        let settings = Settings::builder()
+            .backend(Backend::Rlimit)
+            .cgroup(CgroupLimits {
+                memory_max: Some(64 * 1024 * 1024),
+                ..CgroupLimits::default()
+            })
+            .cgroup_root(Some(PathBuf::from("/no/such/kekkai-cgroup-root")))
+            .build();
+        match Sandbox::prepare_with_host(&host, &settings, ".") {
+            Err(Error::Unavailable { message, .. } | Error::Invalid { message, .. }) => {
+                assert!(
+                    !message.contains("cached probe"),
+                    "custom cgroup_root must be probed: {message}"
+                );
+            }
+            Err(error) => panic!("expected unavailable, got {error}"),
+            Ok(_) => panic!("missing cgroup_root must not prepare"),
+        }
+    }
+
+    #[test]
+    fn stale_namespace_cache_fails_closed() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let mut host = Host::probe();
+        if host.capabilities.user_namespaces {
+            host.capabilities.user_namespaces = false;
+        }
+        let settings = Settings::builder()
+            .backend(Backend::LinuxNative)
+            .namespaces(Namespaces::Isolate)
+            .build();
+        match Sandbox::prepare_with_host(&host, &settings, ".") {
+            Err(Error::Unavailable { .. } | Error::Unsupported { .. }) => {}
+            Err(error) => panic!("expected unavailable, got {error}"),
+            Ok(_) => panic!("stale cache must not prepare isolate namespaces"),
+        }
     }
 
     #[test]

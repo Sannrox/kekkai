@@ -36,7 +36,12 @@ is not shipped. See [ADR 0003](decisions/0003-guest-backend-interface.md).
 ## Host detection
 
 Call `kekkai::capabilities()` for what this process can enforce, and
-`kekkai::health(&settings)` for the configured backend:
+`kekkai::health(&settings)` for the configured backend. A runner that
+prepares many jobs should `Host::probe()` once and call
+`Sandbox::prepare_with_host`; `Host::health` uses the snapshot and does
+not write cgroup probe dirs or fork probe children. `Host::refresh`
+repeats the probes. If the host changed under the snapshot, prepare or
+apply fails; isolation is never weaker than the snapshot claimed.
 
 - `Health::Ok` — prepare can proceed.
 - `Health::Warning` — prepare can proceed (`none` always warns).

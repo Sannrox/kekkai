@@ -122,6 +122,7 @@ pub(super) fn require_abi(abi: u32) -> Result<u32, Error> {
 /// Prove the kernel will accept a ruleset and a seccomp filter in a child,
 /// not merely report an ABI number.
 pub(super) fn probe_enforcement() -> Result<u32, Error> {
+    crate::probe_stats::inc_landlock_child();
     let abi = require_abi(probe_abi()?)?;
     let ruleset = create_ruleset(abi)?;
     let read_dir = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;

@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use kekkai::{
-    AllowHost, Backend, CgroupLimits, FilesystemView, Health, Limits, Namespaces, Network,
+    AllowHost, Backend, CgroupLimits, FilesystemView, Health, Host, Limits, Namespaces, Network,
     OverlayPersist, Sandbox, Settings, SyscallProfile,
 };
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,10 @@ fn main() {
             Some(Settings::builder().backend(Backend::LinuxNative).build()),
         ),
         (
+            "linux_native_cached_host",
+            Some(Settings::builder().backend(Backend::LinuxNative).build()),
+        ),
+        (
             "linux_native_namespaces",
             Some(
                 Settings::builder()
@@ -189,7 +193,14 @@ fn main() {
     let mut reports = Vec::new();
     let mut failed = false;
     for (name, settings) in scenarios.drain(..) {
-        match measure(settings.as_ref(), &workspace, opts.warmup, opts.samples) {
+        let cached = name.ends_with("_cached_host");
+        match measure(
+            settings.as_ref(),
+            &workspace,
+            opts.warmup,
+            opts.samples,
+            cached,
+        ) {
             Ok(sampled) => {
                 let report = ScenarioReport {
                     name: name.to_string(),
@@ -317,21 +328,24 @@ fn measure(
     workspace: &Path,
     warmup: usize,
     samples: usize,
+    cached: bool,
 ) -> Result<Sampled, MeasureError> {
+    let host = if cached { Some(Host::probe()) } else { None };
+    let host = host.as_ref();
     if let Some(settings) = settings {
         match kekkai::health(settings) {
             Health::Ok(_) | Health::Warning(_) => {}
             Health::Error(message) => return Err(MeasureError::Skip(message)),
             _ => return Err(MeasureError::Skip("unrecognized health variant".into())),
         }
-        one_job(settings, workspace).map_err(MeasureError::Fail)?;
+        one_job(settings, workspace, host).map_err(MeasureError::Fail)?;
     } else {
         unsandboxed().map_err(MeasureError::Fail)?;
     }
 
     for _ in 0..warmup {
         if let Some(settings) = settings {
-            one_job(settings, workspace).map_err(MeasureError::Fail)?;
+            one_job(settings, workspace, host).map_err(MeasureError::Fail)?;
         } else {
             unsandboxed().map_err(MeasureError::Fail)?;
         }
@@ -341,7 +355,7 @@ fn measure(
     for _ in 0..samples {
         let started = Instant::now();
         if let Some(settings) = settings {
-            one_job(settings, workspace).map_err(MeasureError::Fail)?;
+            one_job(settings, workspace, host).map_err(MeasureError::Fail)?;
         } else {
             unsandboxed().map_err(MeasureError::Fail)?;
         }
@@ -349,9 +363,10 @@ fn measure(
     }
 
     let jobs_per_s =
-        throughput(settings, workspace, THROUGHPUT_JOBS, 1).map_err(MeasureError::Fail)?;
-    let jobs_per_s_parallel = throughput(settings, workspace, THROUGHPUT_JOBS, PARALLEL_THREADS)
-        .map_err(MeasureError::Fail)?;
+        throughput(settings, workspace, THROUGHPUT_JOBS, 1, host).map_err(MeasureError::Fail)?;
+    let jobs_per_s_parallel =
+        throughput(settings, workspace, THROUGHPUT_JOBS, PARALLEL_THREADS, host)
+            .map_err(MeasureError::Fail)?;
     Ok(Sampled {
         samples: times,
         jobs_per_s,
@@ -364,12 +379,13 @@ fn throughput(
     workspace: &Path,
     jobs: usize,
     threads: usize,
+    host: Option<&Host>,
 ) -> Result<f64, String> {
     let started = Instant::now();
     if threads <= 1 {
         for _ in 0..jobs {
             if let Some(settings) = settings {
-                one_job(settings, workspace)?;
+                one_job(settings, workspace, host)?;
             } else {
                 unsandboxed()?;
             }
@@ -382,7 +398,7 @@ fn throughput(
                 joins.push(scope.spawn(|| {
                     for _ in 0..per_thread {
                         if let Some(settings) = settings {
-                            one_job(settings, workspace)?;
+                            one_job(settings, workspace, host)?;
                         } else {
                             unsandboxed()?;
                         }
@@ -405,8 +421,12 @@ fn throughput(
     Ok(total as f64 / elapsed)
 }
 
-fn one_job(settings: &Settings, workspace: &Path) -> Result<(), String> {
-    let sandbox = Sandbox::prepare(settings, workspace).map_err(|error| error.to_string())?;
+fn one_job(settings: &Settings, workspace: &Path, host: Option<&Host>) -> Result<(), String> {
+    let sandbox = match host {
+        Some(host) => Sandbox::prepare_with_host(host, settings, workspace),
+        None => Sandbox::prepare(settings, workspace),
+    }
+    .map_err(|error| error.to_string())?;
     let mut cmd = payload();
     sandbox.apply(&mut cmd).map_err(|error| error.to_string())?;
     let status = cmd.status().map_err(|error| error.to_string())?;
@@ -478,6 +498,14 @@ fn check_budgets(report: &Report) -> Result<(), String> {
         return Err(format!(
             "linux_native sequential {:.1} jobs/s is below {MIN_JOBS_PER_S}",
             native.jobs_per_s
+        ));
+    }
+    if let Some(cached) = find(report, "linux_native_cached_host")
+        && cached.jobs_per_s < MIN_JOBS_PER_S
+    {
+        return Err(format!(
+            "linux_native_cached_host sequential {:.1} jobs/s is below {MIN_JOBS_PER_S}",
+            cached.jobs_per_s
         ));
     }
     Ok(())

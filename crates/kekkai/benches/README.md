@@ -14,3 +14,5 @@ Published budgets (enforced when the scenario ran):
 - `linux_native` with isolate namespaces, filesystem view, and cgroup
   p95 overhead ≤ 25 ms
 - `linux_native` sequential ≥ 50 jobs/s
+- `linux_native_cached_host` (one `Host::probe`, then `prepare_with_host`)
+  sequential ≥ 50 jobs/s
