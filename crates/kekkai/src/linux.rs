@@ -248,6 +248,7 @@ pub(super) enum SocketPolicy {
     UnixOnly,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply(
     command: &mut Command,
     limits: Limits,
