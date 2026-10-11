@@ -25,7 +25,9 @@ jobs:
       - name: Build
         run: cargo build --locked --workspace --all-targets
       - name: Test
-        run: cargo test --locked --workspace
+        run: |
+          cargo test --locked --workspace
+          cargo test --locked --workspace --features tokio
 
   fmt:
     name: Rustfmt

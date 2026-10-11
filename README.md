@@ -48,7 +48,9 @@ let status = cmd.status()?;
 ```
 
 `tokio::process::Command` is supported behind the `tokio` cargo feature
-(`Sandbox::apply_tokio`).
+(`Sandbox::apply_tokio`, `Sandbox::spawn_with_deadline_tokio`).
+`Sandbox::spawn_with_deadline` kills the process group after a wall-clock
+limit (`SIGTERM`, then `SIGKILL` and `cgroup.kill`).
 
 ## Non-goals
 

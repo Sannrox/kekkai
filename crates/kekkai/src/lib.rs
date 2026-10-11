@@ -102,6 +102,8 @@ pub struct ChildUsage {
     pub memory_peak_bytes: Option<u64>,
     /// CPU time in microseconds (`cpu.stat` `usage_usec`).
     pub cpu_usec: Option<u64>,
+    /// True when [`Sandbox::spawn_with_deadline`] expired the wall-clock limit.
+    pub timed_out: bool,
 }
 
 /// Unix resource limits applied in the child before exec.
@@ -454,18 +456,153 @@ impl Sandbox {
     ///
     /// Best-effort cleanup for timeout and shutdown. Ignores `ESRCH`.
     pub fn kill_process_group(&self, pid: Option<u32>) {
+        self.signal_spawned(pid, sigkill());
+    }
+
+    /// Apply hooks, spawn, and enforce a wall-clock deadline.
+    ///
+    /// At `deadline` the process group receives `SIGTERM`. After `term_grace`
+    /// a still-running group is `SIGKILL`ed and the cgroup is killed. The
+    /// returned usage has `timed_out` set only when the deadline expired.
+    pub fn spawn_with_deadline(
+        &self,
+        command: &mut Command,
+        deadline: std::time::Duration,
+        term_grace: std::time::Duration,
+    ) -> Result<(std::process::ExitStatus, ChildUsage), Error> {
+        self.apply(command)?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::invalid(format!("spawn sandboxed command: {error}")))?;
+        let pid = child.id();
+        let mut guard = DeadlineGuard {
+            sandbox: self,
+            pid: Some(pid),
+            disarm: false,
+        };
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    guard.disarm = true;
+                    return Ok((status, self.usage_after(false)));
+                }
+                Ok(None) if started.elapsed() >= deadline => {
+                    self.signal_spawned(Some(pid), sigterm());
+                    let grace_end = std::time::Instant::now() + term_grace;
+                    while std::time::Instant::now() < grace_end {
+                        if let Ok(Some(_)) = child.try_wait() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    self.kill_process_group(Some(pid));
+                    self.kill_cgroup();
+                    let status = match child.try_wait() {
+                        Ok(Some(status)) => status,
+                        _ => child.wait().map_err(|error| {
+                            Error::invalid(format!("wait sandboxed command: {error}"))
+                        })?,
+                    };
+                    guard.disarm = true;
+                    return Ok((status, self.usage_after(true)));
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(error) => {
+                    return Err(Error::invalid(format!("wait sandboxed command: {error}")));
+                }
+            }
+        }
+    }
+
+    /// Same as [`Self::spawn_with_deadline`] for `tokio::process::Command`.
+    #[cfg(feature = "tokio")]
+    pub async fn spawn_with_deadline_tokio(
+        &self,
+        command: &mut tokio::process::Command,
+        deadline: std::time::Duration,
+        term_grace: std::time::Duration,
+    ) -> Result<(std::process::ExitStatus, ChildUsage), Error> {
+        self.apply_tokio(command)?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::invalid(format!("spawn sandboxed command: {error}")))?;
+        let pid = child.id();
+        let mut guard = DeadlineGuard {
+            sandbox: self,
+            pid,
+            disarm: false,
+        };
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    guard.disarm = true;
+                    return Ok((status, self.usage_after(false)));
+                }
+                Ok(None) if started.elapsed() >= deadline => {
+                    self.signal_spawned(pid, sigterm());
+                    let grace_end = std::time::Instant::now() + term_grace;
+                    while std::time::Instant::now() < grace_end {
+                        if let Ok(Some(_)) = child.try_wait() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    self.kill_process_group(pid);
+                    self.kill_cgroup();
+                    let status = match child.try_wait() {
+                        Ok(Some(status)) => status,
+                        _ => child.wait().await.map_err(|error| {
+                            Error::invalid(format!("wait sandboxed command: {error}"))
+                        })?,
+                    };
+                    guard.disarm = true;
+                    return Ok((status, self.usage_after(true)));
+                }
+                Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                Err(error) => {
+                    return Err(Error::invalid(format!("wait sandboxed command: {error}")));
+                }
+            }
+        }
+    }
+
+    fn usage_after(&self, timed_out: bool) -> ChildUsage {
+        let mut usage = self.finish();
+        usage.timed_out = timed_out;
+        usage
+    }
+
+    fn kill_cgroup(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(prepared) = &self.cgroup {
+            prepared.kill();
+        }
+    }
+
+    fn signal_spawned(&self, pid: Option<u32>, sig: i32) {
         #[cfg(unix)]
-        if matches!(
-            self.settings.backend,
-            Backend::Rlimit | Backend::LinuxNative
-        ) && let Some(pid) = pid
+        if let Some(pid) = pid
             && pid > 1
         {
-            // SAFETY: negative pid targets the process group. The pid came
-            // from a spawned child of this process.
+            let target = if matches!(
+                self.settings.backend,
+                Backend::Rlimit | Backend::LinuxNative
+            ) {
+                -(pid as libc::pid_t)
+            } else {
+                pid as libc::pid_t
+            };
+            // SAFETY: `pid` came from a child of this process. Negative
+            // targets the process group created in `pre_exec`.
             unsafe {
-                let _ = libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                let _ = libc::kill(target, sig);
             }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (pid, sig);
         }
     }
 
@@ -504,6 +641,43 @@ impl Sandbox {
         {
             None
         }
+    }
+}
+
+struct DeadlineGuard<'a> {
+    sandbox: &'a Sandbox,
+    pid: Option<u32>,
+    disarm: bool,
+}
+
+impl Drop for DeadlineGuard<'_> {
+    fn drop(&mut self) {
+        if !self.disarm {
+            self.sandbox.kill_process_group(self.pid);
+            self.sandbox.kill_cgroup();
+        }
+    }
+}
+
+fn sigterm() -> i32 {
+    #[cfg(unix)]
+    {
+        libc::SIGTERM
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+fn sigkill() -> i32 {
+    #[cfg(unix)]
+    {
+        libc::SIGKILL
+    }
+    #[cfg(not(unix))]
+    {
+        0
     }
 }
 

@@ -39,7 +39,12 @@ impl CgroupPrepared {
             oom_killed: oom_kill_count(&self.dir).unwrap_or(0) > 0,
             memory_peak_bytes: read_u64_file(&self.dir.join("memory.peak")),
             cpu_usec: cpu_usage_usec(&self.dir),
+            timed_out: false,
         }
+    }
+
+    pub(super) fn kill(&self) {
+        let _ = fs::write(self.dir.join("cgroup.kill"), b"1");
     }
 }
 

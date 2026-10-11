@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(action) = args.next() else {
         eprintln!(
-            "usage: kekkai-probe write|read|socket|write-bytes|mmap-va|touch-bytes|fork-count ..."
+            "usage: kekkai-probe write|read|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent ..."
         );
         return ExitCode::from(2);
     };
@@ -150,6 +150,91 @@ fn main() -> ExitCode {
             {
                 let _ = want;
                 eprintln!("fork-count requires Unix");
+                ExitCode::from(2)
+            }
+        }
+        "ignore-term" => {
+            let Some(pid_file) = args.next() else {
+                return ExitCode::from(2);
+            };
+            #[cfg(unix)]
+            {
+                // SAFETY: test child ignores SIGTERM so the grace period must escalate.
+                unsafe {
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                }
+                // SAFETY: grandchild occupies the process group until SIGKILL.
+                let child = unsafe { libc::fork() };
+                if child < 0 {
+                    eprintln!("fork: {}", std::io::Error::last_os_error());
+                    return ExitCode::FAILURE;
+                }
+                if child == 0 {
+                    unsafe {
+                        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    }
+                    loop {
+                        unsafe {
+                            libc::pause();
+                        }
+                    }
+                }
+                let record = format!("{}\n{child}\n", std::process::id());
+                if let Err(error) = fs::write(&pid_file, record) {
+                    eprintln!("write {pid_file}: {error}");
+                    return ExitCode::FAILURE;
+                }
+                loop {
+                    unsafe {
+                        libc::pause();
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = pid_file;
+                eprintln!("ignore-term requires Unix");
+                ExitCode::from(2)
+            }
+        }
+        "term-parent" => {
+            let Some(pid_file) = args.next() else {
+                return ExitCode::from(2);
+            };
+            #[cfg(unix)]
+            {
+                // SAFETY: grandchild ignores SIGTERM; parent keeps the default so
+                // SIGTERM reaps the leader while the child stays until SIGKILL.
+                let child = unsafe { libc::fork() };
+                if child < 0 {
+                    eprintln!("fork: {}", std::io::Error::last_os_error());
+                    return ExitCode::FAILURE;
+                }
+                if child == 0 {
+                    unsafe {
+                        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                    }
+                    loop {
+                        unsafe {
+                            libc::pause();
+                        }
+                    }
+                }
+                let record = format!("{}\n{child}\n", std::process::id());
+                if let Err(error) = fs::write(&pid_file, record) {
+                    eprintln!("write {pid_file}: {error}");
+                    return ExitCode::FAILURE;
+                }
+                loop {
+                    unsafe {
+                        libc::pause();
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = pid_file;
+                eprintln!("term-parent requires Unix");
                 ExitCode::from(2)
             }
         }
