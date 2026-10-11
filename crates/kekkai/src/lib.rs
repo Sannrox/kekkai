@@ -352,6 +352,12 @@ pub struct Settings {
     /// Scratch is always writable. The workspace root is writable when
     /// [`Self::output`] is `None` or names that same path.
     pub writable_roots: Vec<PathBuf>,
+    /// Extra character or block devices granted under `linux_native`.
+    /// Empty (the default) grants only the built-in nodes (`/dev/null`,
+    /// `/dev/zero`, `/dev/urandom`, `/dev/random`). Paths must exist and
+    /// be device nodes at prepare. Landlock mediates open and, on ABI 5+,
+    /// device ioctl.
+    pub devices: Vec<PathBuf>,
     /// Socket and network-namespace policy. `Deny`, `Allow`, and `Allowlist`
     /// apply under `linux_native`. `Loopback` also requires isolate namespaces
     /// on `rlimit` or `linux_native`.
@@ -422,6 +428,12 @@ impl SettingsBuilder {
     /// Extra read-and-write paths.
     pub fn writable_roots(mut self, writable_roots: Vec<PathBuf>) -> Self {
         self.inner.writable_roots = writable_roots;
+        self
+    }
+
+    /// Extra character or block devices.
+    pub fn devices(mut self, devices: Vec<PathBuf>) -> Self {
+        self.inner.devices = devices;
         self
     }
 
@@ -867,11 +879,12 @@ fn linux_native_health(settings: &Settings) -> Health {
                 "unavailable"
             };
             Health::Ok(format!(
-                "sandbox:   backend=linux_native abi={abi} network={network} syscalls={} signal_scoping={signal} writable=output+scratch+{} inputs={} readable={} cpu={:?} memory_mb={:?} user_processes={:?} violations={violations} fs_violations=unavailable",
+                "sandbox:   backend=linux_native abi={abi} network={network} syscalls={} signal_scoping={signal} writable=output+scratch+{} inputs={} readable={} devices={} cpu={:?} memory_mb={:?} user_processes={:?} violations={violations} fs_violations=unavailable",
                 syscall_profile_label(settings.syscall_profile),
                 settings.writable_roots.len(),
                 settings.inputs.len(),
                 settings.readable_roots.len(),
+                settings.devices.len(),
                 settings.limits.cpu_time_secs,
                 settings.limits.memory_mb,
                 settings.limits.user_processes
@@ -964,6 +977,7 @@ impl Sandbox {
                 settings.output.as_deref(),
                 &settings.readable_roots,
                 &settings.writable_roots,
+                &settings.devices,
             )?)
         } else {
             None
@@ -1022,7 +1036,7 @@ impl Sandbox {
                     &settings.inputs,
                     &settings.readable_roots,
                     &settings.writable_roots,
-                    &[],
+                    &settings.devices,
                     owned_scratch,
                 )?))
             }
@@ -1701,11 +1715,14 @@ fn validate(settings: &Settings) -> Result<(), Error> {
         }
     }
     let named_paths = !settings.inputs.is_empty() || settings.output.is_some();
-    if (named_paths || !settings.readable_roots.is_empty() || !settings.writable_roots.is_empty())
+    if (named_paths
+        || !settings.readable_roots.is_empty()
+        || !settings.writable_roots.is_empty()
+        || !settings.devices.is_empty())
         && !matches!(settings.backend, Backend::LinuxNative | Backend::Userspace)
     {
         return Err(Error::invalid(
-            "path roles, readable_roots, and writable_roots are only applied by backend linux_native or userspace",
+            "path roles, readable_roots, writable_roots, and devices are only applied by backend linux_native or userspace",
         ));
     }
     if let Some(path) = &settings.guest_helper {
@@ -1725,6 +1742,7 @@ fn validate(settings: &Settings) -> Result<(), Error> {
         .chain(settings.output.iter())
         .chain(settings.readable_roots.iter())
         .chain(settings.writable_roots.iter())
+        .chain(settings.devices.iter())
     {
         if !path.is_absolute() {
             return Err(Error::invalid(format!(
@@ -2129,6 +2147,28 @@ mod tests {
         let error = Sandbox::prepare(&settings, ".").unwrap_err();
         assert!(
             matches!(error, Error::Invalid { ref message } if message.contains("Allowlist")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn devices_require_linux_native() {
+        let mut settings = Settings::default();
+        settings.devices.push("/dev/full".into());
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("linux_native"), "{error}");
+    }
+
+    #[test]
+    fn devices_must_be_absolute() {
+        let mut settings = Settings {
+            backend: Backend::LinuxNative,
+            ..Settings::default()
+        };
+        settings.devices.push("dev/full".into());
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(
+            matches!(error, Error::Invalid { ref message } if message.contains("absolute")),
             "{error}"
         );
     }

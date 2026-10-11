@@ -17,6 +17,9 @@ Not yet published to crates.io.
   allow (Landlock, ABI 3 or newer). Named roles: read-only `inputs`, a
   writable `output` directory (the workspace when unset), and a private
   per-run scratch dir (`TMPDIR`). Overlapping roles are rejected.
+  Extra device nodes are listed in `Settings.devices`; none are granted
+  by default beyond `/dev/null`, `/dev/zero`, `/dev/urandom`, and
+  `/dev/random`.
 - **No network by default:** a seccomp filter denies socket creation.
   `Network::Allow` leaves sockets to the host; filesystem rules still apply.
   `Network::Allowlist` permits listed hosts through a parent CONNECT proxy

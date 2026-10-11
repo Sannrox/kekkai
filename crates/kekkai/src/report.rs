@@ -24,6 +24,8 @@ pub struct SettingsSummary {
     pub filesystem_view: String,
     /// True when any cgroup limit was requested.
     pub cgroup: bool,
+    /// Number of extra device grants.
+    pub devices: usize,
 }
 
 impl Default for SettingsSummary {
@@ -35,6 +37,7 @@ impl Default for SettingsSummary {
             namespaces: "off".into(),
             filesystem_view: "host".into(),
             cgroup: false,
+            devices: 0,
         }
     }
 }
@@ -67,6 +70,7 @@ impl SettingsSummary {
             }
             .into(),
             cgroup: !settings.cgroup.is_empty(),
+            devices: settings.devices.len(),
         }
     }
 }

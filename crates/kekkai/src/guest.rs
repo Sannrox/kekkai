@@ -87,6 +87,10 @@ fn helper_argv(
         argv.push(OsString::from("--writable"));
         argv.push(path.as_os_str().to_os_string());
     }
+    for path in &settings.devices {
+        argv.push(OsString::from("--device"));
+        argv.push(path.as_os_str().to_os_string());
+    }
     if let Some(value) = settings.limits.cpu_time_secs {
         argv.push(OsString::from("--cpu-time-secs"));
         argv.push(OsString::from(value.to_string()));
@@ -229,7 +233,7 @@ pub(crate) fn missing_helper_error(message: String) -> Error {
 #[cfg(feature = "guest")]
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: kekkai-guest --workspace DIR [--output DIR] [--network deny|allow] [--input DIR]... [--readable DIR]... [--writable DIR]... [--cpu-time-secs N] [--memory-mb N] [--user-processes N] [--file-size-mb N] [--open-files N] -- PROGRAM [ARGS...]"
+        "usage: kekkai-guest --workspace DIR [--output DIR] [--network deny|allow] [--input DIR]... [--readable DIR]... [--writable DIR]... [--device PATH]... [--cpu-time-secs N] [--memory-mb N] [--user-processes N] [--file-size-mb N] [--open-files N] -- PROGRAM [ARGS...]"
     );
     ExitCode::from(2)
 }
@@ -263,6 +267,7 @@ pub(crate) fn run() -> ExitCode {
     let mut inputs = Vec::new();
     let mut readable = Vec::new();
     let mut writable = Vec::new();
+    let mut devices = Vec::new();
     let mut limits = Limits::default();
     let mut program: Option<OsString> = None;
     let mut args: Vec<OsString> = Vec::new();
@@ -293,6 +298,7 @@ pub(crate) fn run() -> ExitCode {
             "--input" => inputs.push(PathBuf::from(value)),
             "--readable" => readable.push(PathBuf::from(value)),
             "--writable" => writable.push(PathBuf::from(value)),
+            "--device" => devices.push(PathBuf::from(value)),
             "--cpu-time-secs" => {
                 let Some(parsed) = parse_u64(&value) else {
                     return usage();
@@ -341,6 +347,7 @@ pub(crate) fn run() -> ExitCode {
         .output(output)
         .readable_roots(readable)
         .writable_roots(writable)
+        .devices(devices)
         .limits(limits)
         .build();
     let sandbox = match Sandbox::prepare(&settings, &workspace) {
@@ -386,6 +393,30 @@ pub(crate) fn run() -> ExitCode {
 mod tests {
     use super::*;
     use crate::Limits;
+
+    #[test]
+    fn wrap_forwards_device_grant() {
+        let settings = Settings {
+            devices: vec![PathBuf::from("/dev/full")],
+            ..Settings::default()
+        };
+        let cmd = wrap_command(
+            Path::new("/helper"),
+            Path::new("/workspace"),
+            &settings,
+            "true",
+            std::iter::empty::<&OsStr>(),
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "--device" && pair[1] == "/dev/full"),
+            "{args:?}"
+        );
+    }
 
     #[test]
     fn wrap_forwards_memory_limit() {

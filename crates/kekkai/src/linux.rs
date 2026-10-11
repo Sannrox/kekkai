@@ -186,6 +186,7 @@ pub(super) fn prepare(
     output: Option<&Path>,
     readable_roots: &[PathBuf],
     writable_roots: &[PathBuf],
+    devices: &[PathBuf],
 ) -> Result<Arc<LinuxPrepared>, Error> {
     let abi = require_abi(probe_abi()?)?;
     let workspace = fs::canonicalize(workspace).map_err(|error| {
@@ -197,6 +198,7 @@ pub(super) fn prepare(
     let inputs = canonicalize_all(inputs, "inputs")?;
     let readable_roots = canonicalize_all(readable_roots, "readable_roots")?;
     let writable_roots = canonicalize_all(writable_roots, "writable_roots")?;
+    let devices = canonicalize_devices(devices)?;
     let output = match output {
         Some(path) => fs::canonicalize(path)
             .map_err(|error| Error::invalid(format!("output `{}`: {error}", path.display())))?,
@@ -233,7 +235,29 @@ pub(super) fn prepare(
         &readable_roots,
         &writable_roots,
     )?;
+    add_device_rules(&prepared.ruleset, abi, &devices)?;
     Ok(Arc::new(prepared))
+}
+
+fn canonicalize_devices(paths: &[PathBuf]) -> Result<Vec<PathBuf>, Error> {
+    use std::os::unix::fs::FileTypeExt;
+
+    paths
+        .iter()
+        .map(|path| {
+            let meta = fs::metadata(path)
+                .map_err(|error| Error::invalid(format!("device `{}`: {error}", path.display())))?;
+            let kind = meta.file_type();
+            if !kind.is_char_device() && !kind.is_block_device() {
+                return Err(Error::invalid(format!(
+                    "device `{}` is not a character or block device",
+                    path.display()
+                )));
+            }
+            fs::canonicalize(path)
+                .map_err(|error| Error::invalid(format!("device `{}`: {error}", path.display())))
+        })
+        .collect()
 }
 
 fn canonicalize_all(paths: &[PathBuf], label: &str) -> Result<Vec<PathBuf>, Error> {
@@ -652,6 +676,14 @@ fn add_path_rules(
         if path != output && path != scratch {
             add_path(ruleset, path, write_dir, abi)?;
         }
+    }
+    Ok(())
+}
+
+fn add_device_rules(ruleset: &OwnedFd, abi: u32, devices: &[PathBuf]) -> Result<(), Error> {
+    let access = ACCESS_FS_READ_FILE | ACCESS_FS_WRITE_FILE | truncate_bit(abi) | ioctl_bit(abi);
+    for path in devices {
+        add_path(ruleset, path, access, abi)?;
     }
     Ok(())
 }
