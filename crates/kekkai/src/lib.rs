@@ -2,7 +2,8 @@
 //!
 //! kekkai applies a filesystem allowlist (Landlock), a syscall and network
 //! gate (seccomp) and resource limits to a [`std::process::Command`] before it
-//! spawns.
+//! spawns. [`Backend::Userspace`] (cargo feature `guest`) launches a helper
+//! that owns spawn instead.
 //!
 //! Public enums and [`Settings`] are `#[non_exhaustive]`. Construct settings
 //! with [`Settings::builder`] so adding a field later is not a breaking change.
@@ -40,6 +41,7 @@ use std::sync::{Arc, Mutex};
 mod capture;
 #[cfg(target_os = "linux")]
 mod cgroup;
+mod guest;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
@@ -68,6 +70,10 @@ pub enum Backend {
     Rlimit,
     /// Landlock filesystem rules plus a seccomp socket gate, applied in `pre_exec`.
     LinuxNative,
+    /// Userspace helper owns spawn. No guest kernel image. Requires the
+    /// `guest` cargo feature and a helper (`Settings::guest_helper`,
+    /// `KEKKAI_GUEST_HELPER`, or `kekkai-guest` on `PATH`).
+    Userspace,
 }
 
 impl fmt::Display for Backend {
@@ -76,6 +82,7 @@ impl fmt::Display for Backend {
             Backend::None => "none",
             Backend::Rlimit => "rlimit",
             Backend::LinuxNative => "linux_native",
+            Backend::Userspace => "userspace",
         })
     }
 }
@@ -363,6 +370,9 @@ pub struct Settings {
     /// `Python` are per-architecture allowlists and require
     /// [`Backend::LinuxNative`].
     pub syscall_profile: SyscallProfile,
+    /// Helper binary for [`Backend::Userspace`]. `None` uses
+    /// `KEKKAI_GUEST_HELPER` or `kekkai-guest` on `PATH`.
+    pub guest_helper: Option<PathBuf>,
 }
 
 impl Settings {
@@ -448,6 +458,12 @@ impl SettingsBuilder {
     /// Seccomp syscall profile.
     pub fn syscall_profile(mut self, syscall_profile: SyscallProfile) -> Self {
         self.inner.syscall_profile = syscall_profile;
+        self
+    }
+
+    /// Helper binary for [`Backend::Userspace`].
+    pub fn guest_helper(mut self, guest_helper: Option<PathBuf>) -> Self {
+        self.inner.guest_helper = guest_helper;
         self
     }
 
@@ -645,6 +661,7 @@ pub fn health(settings: &Settings) -> Health {
             }
         }
         Backend::LinuxNative => linux_native_health(settings),
+        Backend::Userspace => userspace_health(settings),
     };
     let with_cgroup = match (&backend, cgroup_health(settings)) {
         (_, Some(Health::Error(message))) => Health::Error(message),
@@ -869,10 +886,36 @@ fn linux_native_health(_settings: &Settings) -> Health {
     Health::Error("sandbox backend linux_native is supported only on Linux".into())
 }
 
+fn userspace_health(settings: &Settings) -> Health {
+    #[cfg(not(feature = "guest"))]
+    {
+        let _ = settings;
+        Health::Error("sandbox backend userspace requires cargo feature guest".into())
+    }
+    #[cfg(feature = "guest")]
+    {
+        if !cfg!(target_os = "linux") {
+            return Health::Error("sandbox backend userspace is supported only on Linux".into());
+        }
+        match guest::resolve_helper(settings) {
+            Err(message) => Health::Error(message),
+            Ok(path) => match linux_native_health(settings) {
+                Health::Error(message) => Health::Error(message),
+                Health::Ok(_) | Health::Warning(_) => Health::Ok(format!(
+                    "sandbox:   backend=userspace helper={}",
+                    path.display()
+                )),
+            },
+        }
+    }
+}
+
 /// Prepared sandbox, applied to a [`Command`] before spawn.
 #[derive(Debug)]
 pub struct Sandbox {
     settings: Settings,
+    root: PathBuf,
+    guest_helper: Option<PathBuf>,
     prepared_at: Instant,
     prepare_ms: u64,
     apply_ms: AtomicU64,
@@ -906,8 +949,9 @@ impl Sandbox {
 
     fn prepare_inner(settings: &Settings, root: impl AsRef<Path>) -> Result<Self, Error> {
         let started = Instant::now();
+        let root = root.as_ref();
         validate(settings)?;
-        check_path_roles(settings, root.as_ref())?;
+        check_path_roles(settings, root)?;
         match health(settings) {
             Health::Error(message) => return Err(error_from_health(settings.backend, message)),
             Health::Ok(_) | Health::Warning(_) => {}
@@ -915,7 +959,7 @@ impl Sandbox {
         #[cfg(target_os = "linux")]
         let linux = if matches!(settings.backend, Backend::LinuxNative) {
             Some(linux::prepare(
-                root.as_ref(),
+                root,
                 &settings.inputs,
                 settings.output.as_deref(),
                 &settings.readable_roots,
@@ -951,7 +995,7 @@ impl Sandbox {
             FilesystemView::Isolate { overlay } => {
                 let overlay_target = match &settings.output {
                     Some(path) => path.clone(),
-                    None => root.as_ref().to_path_buf(),
+                    None => root.to_path_buf(),
                 };
                 let (scratch, owned_scratch) = match &linux {
                     Some(prepared) => (prepared.scratch.clone(), None),
@@ -983,10 +1027,22 @@ impl Sandbox {
                 )?))
             }
         };
-        #[cfg(not(target_os = "linux"))]
-        let _ = root;
+        let guest_helper = if matches!(settings.backend, Backend::Userspace) {
+            Some(guest::resolve_helper(settings).map_err(guest::missing_helper_error)?)
+        } else {
+            None
+        };
+        let root = if matches!(settings.backend, Backend::Userspace) {
+            fs::canonicalize(root).map_err(|error| {
+                Error::invalid(format!("workspace `{}`: {error}", root.display()))
+            })?
+        } else {
+            root.to_path_buf()
+        };
         Ok(Self {
             settings: settings.clone(),
+            root,
+            guest_helper,
             prepared_at: started,
             prepare_ms: millis_since(started),
             apply_ms: AtomicU64::new(0),
@@ -1020,6 +1076,7 @@ impl Sandbox {
             Backend::None => Ok(()),
             Backend::Rlimit => self.apply_rlimit(command),
             Backend::LinuxNative => self.apply_linux_native(command),
+            Backend::Userspace => Err(Error::invalid("guest backend owns spawn; apply is invalid")),
         };
         self.apply_ms
             .fetch_add(millis_since(started), Ordering::Relaxed);
@@ -1030,6 +1087,75 @@ impl Sandbox {
     #[cfg(feature = "tokio")]
     pub fn apply_tokio(&self, command: &mut tokio::process::Command) -> Result<(), Error> {
         self.apply(command.as_std_mut())
+    }
+
+    /// Host command that starts the child.
+    ///
+    /// [`Backend::Userspace`] returns the helper invocation; [`Self::apply`]
+    /// stays [`Error::Invalid`]. In-process backends return `Command::new(program)`
+    /// with [`Self::apply`] already installed.
+    pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Result<Command, Error> {
+        match self.settings.backend {
+            Backend::Userspace => {
+                Ok(self.wrap_guest(program, std::iter::empty::<&std::ffi::OsStr>())?)
+            }
+            Backend::None | Backend::Rlimit | Backend::LinuxNative => {
+                let mut command = Command::new(program);
+                self.apply(&mut command)?;
+                Ok(command)
+            }
+        }
+    }
+
+    /// Spawn `program` with `args`. Guest backends launch the helper.
+    pub fn spawn(
+        &self,
+        program: impl AsRef<std::ffi::OsStr>,
+        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+    ) -> Result<std::process::Child, Error> {
+        let mut command = self.command(program)?;
+        command.args(args);
+        command.spawn().map_err(|error| self.spawn_error(error))
+    }
+
+    fn wrap_guest(
+        &self,
+        program: impl AsRef<std::ffi::OsStr>,
+        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+    ) -> Result<Command, Error> {
+        let helper = self.guest_helper.as_ref().ok_or_else(|| {
+            Error::unavailable(Backend::Userspace, "guest helper was not prepared")
+        })?;
+        Ok(guest::wrap_command(
+            helper,
+            &self.root,
+            &self.settings,
+            program,
+            args,
+        ))
+    }
+
+    fn wrap_guest_command(&self, command: &mut Command) -> Result<(), Error> {
+        let helper = self.guest_helper.as_ref().ok_or_else(|| {
+            Error::unavailable(Backend::Userspace, "guest helper was not prepared")
+        })?;
+        guest::wrap_into_command(helper, &self.root, &self.settings, command)
+    }
+
+    fn prepare_spawn_command(&self, command: &mut Command) -> Result<(), Error> {
+        if matches!(self.settings.backend, Backend::Userspace) {
+            self.wrap_guest_command(command)
+        } else {
+            self.apply(command)
+        }
+    }
+
+    fn spawn_error(&self, error: io::Error) -> Error {
+        if matches!(self.settings.backend, Backend::Userspace) {
+            Error::unavailable(Backend::Userspace, format!("spawn guest helper: {error}"))
+        } else {
+            Error::invalid(format!("spawn sandboxed command: {error}"))
+        }
     }
 
     #[cfg(unix)]
@@ -1072,6 +1198,16 @@ impl Sandbox {
 
     #[cfg(target_os = "linux")]
     fn apply_linux_native(&self, command: &mut Command) -> Result<(), Error> {
+        self.apply_linux_native_with(command, true, false)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn apply_linux_native_with(
+        &self,
+        command: &mut Command,
+        create_process_group: bool,
+        pdeathsig: bool,
+    ) -> Result<(), Error> {
         let prepared = self
             .linux
             .clone()
@@ -1114,7 +1250,24 @@ impl Sandbox {
             self.view.clone(),
             matches!(self.settings.network, Network::Loopback),
             self.settings.syscall_profile,
+            create_process_group,
+            pdeathsig,
         )
+    }
+
+    /// Install linux_native hooks in the helper. The payload stays in the
+    /// helper process group so library `kill(-helper)` reaches descendants,
+    /// and dies if the helper exits (`PR_SET_PDEATHSIG`).
+    #[cfg(feature = "guest")]
+    pub(crate) fn apply_helper_payload(&self, command: &mut Command) -> Result<(), Error> {
+        #[cfg(target_os = "linux")]
+        {
+            self.apply_linux_native_with(command, false, true)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.apply_linux_native(command)
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1143,10 +1296,8 @@ impl Sandbox {
         deadline: std::time::Duration,
         term_grace: std::time::Duration,
     ) -> Result<(std::process::ExitStatus, ChildUsage), Error> {
-        self.apply(command)?;
-        let mut child = command
-            .spawn()
-            .map_err(|error| Error::invalid(format!("spawn sandboxed command: {error}")))?;
+        self.prepare_spawn_command(command)?;
+        let mut child = command.spawn().map_err(|error| self.spawn_error(error))?;
         self.wait_child_deadline(&mut child, deadline, term_grace)
     }
 
@@ -1169,7 +1320,7 @@ impl Sandbox {
         ),
         Error,
     > {
-        self.apply(command)?;
+        self.prepare_spawn_command(command)?;
         self.spawn_captured_applied(command, deadline, term_grace, capture)
     }
 
@@ -1194,9 +1345,7 @@ impl Sandbox {
         if capture.stderr_max.is_some() {
             command.stderr(Stdio::piped());
         }
-        let mut child = command
-            .spawn()
-            .map_err(|error| Error::invalid(format!("spawn sandboxed command: {error}")))?;
+        let mut child = command.spawn().map_err(|error| self.spawn_error(error))?;
         let stdout = capture::spawn_drain(child.stdout.take(), capture.stdout_max, capture.keep);
         let stderr = capture::spawn_drain(child.stderr.take(), capture.stderr_max, capture.keep);
         let (status, usage) = self.wait_child_deadline(&mut child, deadline, term_grace)?;
@@ -1224,6 +1373,7 @@ impl Sandbox {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    self.reap_userspace_group(Some(pid));
                     guard.disarm = true;
                     return Ok((status, self.usage_after(false)));
                 }
@@ -1263,10 +1413,12 @@ impl Sandbox {
         deadline: std::time::Duration,
         term_grace: std::time::Duration,
     ) -> Result<(std::process::ExitStatus, ChildUsage), Error> {
-        self.apply_tokio(command)?;
-        let mut child = command
-            .spawn()
-            .map_err(|error| Error::invalid(format!("spawn sandboxed command: {error}")))?;
+        if matches!(self.settings.backend, Backend::Userspace) {
+            self.wrap_guest_command(command.as_std_mut())?;
+        } else {
+            self.apply_tokio(command)?;
+        }
+        let mut child = command.spawn().map_err(|error| self.spawn_error(error))?;
         let pid = child.id();
         let mut guard = DeadlineGuard {
             sandbox: self,
@@ -1277,6 +1429,7 @@ impl Sandbox {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    self.reap_userspace_group(pid);
                     guard.disarm = true;
                     return Ok((status, self.usage_after(false)));
                 }
@@ -1328,7 +1481,11 @@ impl Sandbox {
         ),
         Error,
     > {
-        self.apply_tokio(command)?;
+        if matches!(self.settings.backend, Backend::Userspace) {
+            self.wrap_guest_command(command.as_std_mut())?;
+        } else {
+            self.apply_tokio(command)?;
+        }
         self.spawn_captured_applied(command.as_std_mut(), deadline, term_grace, capture)
     }
 
@@ -1345,6 +1502,12 @@ impl Sandbox {
         }
     }
 
+    fn reap_userspace_group(&self, pid: Option<u32>) {
+        if matches!(self.settings.backend, Backend::Userspace) {
+            self.kill_process_group(pid);
+        }
+    }
+
     fn signal_spawned(&self, pid: Option<u32>, sig: i32) {
         #[cfg(unix)]
         if let Some(pid) = pid
@@ -1352,7 +1515,7 @@ impl Sandbox {
         {
             let target = if matches!(
                 self.settings.backend,
-                Backend::Rlimit | Backend::LinuxNative
+                Backend::Rlimit | Backend::LinuxNative | Backend::Userspace
             ) {
                 -(pid as libc::pid_t)
             } else {
@@ -1460,6 +1623,16 @@ impl Sandbox {
     }
 }
 
+/// CLI entry for the `kekkai-guest` helper.
+///
+/// Parses the helper protocol, prepares [`Backend::LinuxNative`], spawns the
+/// payload without a nested process group, waits, and drops the sandbox so
+/// scratch is removed. The helper is the process-group leader.
+#[cfg(feature = "guest")]
+pub fn run_guest_helper() -> std::process::ExitCode {
+    guest::run()
+}
+
 struct DeadlineGuard<'a> {
     sandbox: &'a Sandbox,
     pid: Option<u32>,
@@ -1529,11 +1702,22 @@ fn validate(settings: &Settings) -> Result<(), Error> {
     }
     let named_paths = !settings.inputs.is_empty() || settings.output.is_some();
     if (named_paths || !settings.readable_roots.is_empty() || !settings.writable_roots.is_empty())
-        && !matches!(settings.backend, Backend::LinuxNative)
+        && !matches!(settings.backend, Backend::LinuxNative | Backend::Userspace)
     {
         return Err(Error::invalid(
-            "path roles, readable_roots, and writable_roots are only applied by backend linux_native",
+            "path roles, readable_roots, and writable_roots are only applied by backend linux_native or userspace",
         ));
+    }
+    if let Some(path) = &settings.guest_helper {
+        if !matches!(settings.backend, Backend::Userspace) {
+            return Err(Error::invalid("guest_helper requires backend userspace"));
+        }
+        if !path.is_absolute() {
+            return Err(Error::invalid(format!(
+                "guest helper `{}` must be an absolute path",
+                path.display()
+            )));
+        }
     }
     for path in settings
         .inputs
@@ -1636,6 +1820,18 @@ fn validate(settings: &Settings) -> Result<(), Error> {
         return Err(Error::invalid(
             "syscall profile strict and python require backend linux_native",
         ));
+    }
+    if matches!(settings.backend, Backend::Userspace) {
+        if !settings.cgroup.is_empty() {
+            return Err(Error::invalid(
+                "cgroup limits are not applied by backend userspace",
+            ));
+        }
+        if matches!(settings.namespaces, Namespaces::Isolate) {
+            return Err(Error::invalid(
+                "namespace isolate is not applied by backend userspace",
+            ));
+        }
     }
     for (name, value) in [
         ("cgroup.memory_max", settings.cgroup.memory_max),
@@ -1769,7 +1965,7 @@ pub(crate) fn join_cgroup(fd: Option<i32>) -> io::Result<()> {
 
 fn error_from_health(backend: Backend, message: String) -> Error {
     let unsupported = match backend {
-        Backend::LinuxNative => !cfg!(target_os = "linux"),
+        Backend::LinuxNative | Backend::Userspace => !cfg!(target_os = "linux"),
         Backend::Rlimit => !cfg!(unix),
         Backend::None => false,
     };
@@ -1833,7 +2029,36 @@ mod tests {
         assert_eq!(Backend::None.to_string(), "none");
         assert_eq!(Backend::Rlimit.to_string(), "rlimit");
         assert_eq!(Backend::LinuxNative.to_string(), "linux_native");
+        assert_eq!(Backend::Userspace.to_string(), "userspace");
         assert_eq!(Backend::default(), Backend::None);
+    }
+
+    #[test]
+    fn userspace_without_helper_does_not_downgrade() {
+        let settings = Settings {
+            backend: Backend::Userspace,
+            guest_helper: Some(PathBuf::from("/no/such/kekkai-guest-helper")),
+            ..Settings::default()
+        };
+        match health(&settings) {
+            Health::Error(_) => {
+                let error = Sandbox::prepare(&settings, ".").unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        Error::Unsupported {
+                            backend: Backend::Userspace,
+                            ..
+                        } | Error::Unavailable {
+                            backend: Backend::Userspace,
+                            ..
+                        }
+                    ),
+                    "{error}"
+                );
+            }
+            other => panic!("expected health error, got {other:?}"),
+        }
     }
 
     #[test]

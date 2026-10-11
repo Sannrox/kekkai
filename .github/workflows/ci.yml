@@ -38,6 +38,7 @@ jobs:
           cargo test --locked --workspace
           cargo test --locked --workspace --features tokio
           cargo test --locked --workspace --features tracing
+          cargo test --locked --workspace --features guest
 
   build-and-test-arm:
     name: Build & Test (aarch64)
@@ -64,6 +65,7 @@ jobs:
           cargo test --locked --workspace
           cargo test --locked --workspace --features tokio
           cargo test --locked --workspace --features tracing
+          cargo test --locked --workspace --features guest
 
   fmt:
     name: Rustfmt

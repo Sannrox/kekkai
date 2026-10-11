@@ -265,6 +265,8 @@ pub(super) fn apply(
     view: Option<Arc<crate::view::ViewPlan>>,
     loopback: bool,
     profile: SyscallProfile,
+    create_process_group: bool,
+    pdeathsig: bool,
 ) -> Result<(), Error> {
     let tmpdir = if view.is_some() {
         prepared.scratch.join("tmp")
@@ -281,8 +283,19 @@ pub(super) fn apply(
     // ruleset file descriptor stays alive in the parent via `prepared`.
     unsafe {
         command.pre_exec(move || {
-            if libc::setpgid(0, 0) != 0 {
+            if create_process_group && libc::setpgid(0, 0) != 0 {
                 return Err(io::Error::last_os_error());
+            }
+            if pdeathsig {
+                if libc::signal(libc::SIGTERM, libc::SIG_DFL) == libc::SIG_ERR {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::getppid() == 1 {
+                    let _ = libc::raise(libc::SIGKILL);
+                }
             }
             crate::join_cgroup(cgroup_procs_fd)?;
             if isolate {

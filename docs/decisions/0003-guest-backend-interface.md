@@ -56,6 +56,9 @@ scheduling.
 - A guest adapter will add a helper binary (and for microVMs, KVM plus
   images). That is an opt-in cargo feature and a fail-closed `health`
   probe, not a new default.
+- Follow-up: Issue #22 shipped `Backend::Userspace` and `Sandbox::spawn`
+  behind the `guest` cargo feature. The helper owns spawn; `apply` is
+  invalid. A KVM adapter is still later work.
 - Numeric-library memory caps remain cgroup `memory.max` on the guest
   process or VM; guest isolation does not replace resource limits.
 
