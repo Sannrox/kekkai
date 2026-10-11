@@ -152,6 +152,14 @@ caps so a runaway child cannot pin memory or a pipe. See
 Call `health` before `prepare`. Treat `Error::Unavailable` as "do not run
 this job here", not as a cue to switch backends.
 
+`Sandbox::report` is a JSON run report (`schema_version` 1): backend,
+network, syscall profile, namespaces, filesystem view, whether cgroup
+limits were set, `ChildUsage` (including violations), and timing in
+milliseconds (`prepare_ms`, `apply_ms`, `since_prepare_ms`). Paths are
+omitted. `RunReport::to_json` / `from_json` round-trip. Enable the
+`tracing` cargo feature to emit `kekkai.prepare`, `kekkai.apply`, and
+`kekkai.finish` spans.
+
 ## Failure modes
 
 | Symptom | Cause |

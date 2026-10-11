@@ -71,6 +71,9 @@ let status = cmd.status()?;
 `tokio::process::Command` is supported behind the `tokio` cargo feature
 (`Sandbox::apply_tokio`, `Sandbox::spawn_with_deadline_tokio`,
 `Sandbox::spawn_with_deadline_captured_tokio`).
+`Sandbox::report` is a JSON run report (schema version 1). The `tracing`
+cargo feature adds `kekkai.prepare`, `kekkai.apply`, and `kekkai.finish`
+spans.
 `Sandbox::spawn_with_deadline` kills the process group after a wall-clock
 limit (`SIGTERM`, then `SIGKILL` and `cgroup.kill`).
 `Sandbox::spawn_with_deadline_captured` keeps stdout and stderr under

@@ -91,6 +91,10 @@ sandbox enforces is listed here.
   (`memory.current`, `cpu.stat`, `io.stat`, `pids.current`) while the
   child may still be running. `CgroupLimits` stays exhaustive; adding a
   field is a 0.x minor change.
+- `Sandbox::report` returns a serializable `RunReport` (schema version 1)
+  with a settings summary, `ChildUsage`, and timing. `to_json` /
+  `from_json` round-trip. Optional `tracing` cargo feature records
+  `kekkai.prepare`, `kekkai.apply`, and `kekkai.finish` spans.
 
 ### Changed
 

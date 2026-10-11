@@ -37,6 +37,7 @@ jobs:
         run: |
           cargo test --locked --workspace
           cargo test --locked --workspace --features tokio
+          cargo test --locked --workspace --features tracing
 
   build-and-test-arm:
     name: Build & Test (aarch64)
@@ -62,6 +63,7 @@ jobs:
         run: |
           cargo test --locked --workspace
           cargo test --locked --workspace --features tokio
+          cargo test --locked --workspace --features tracing
 
   fmt:
     name: Rustfmt
