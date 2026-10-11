@@ -67,6 +67,11 @@ sandbox enforces is listed here.
 - Opt-in `Namespaces::Isolate`: user, mount, PID, IPC, and UTS namespaces
   with a private `/proc`. Requires unprivileged user namespaces. Missing
   support is `Error::Unavailable`; there is no silent fallback.
+- Opt-in `FilesystemView::Isolate` (requires `Namespaces::Isolate`):
+  read-only bind mounts for inputs, tmpfs scratch, overlay on the output
+  tree (`OverlayPersist::Discard` or `Keep`), then a new root so paths
+  outside the view do not exist. Missing overlay or pivot support is
+  `Error::Unavailable`.
 
 ### Changed
 

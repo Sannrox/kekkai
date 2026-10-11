@@ -36,6 +36,11 @@ pub(super) fn probe() -> Result<(), Error> {
 /// PID namespace with `/proc` remounted. The original `Command` child becomes
 /// a wait-proxy and does not return.
 pub(super) fn enter() -> io::Result<()> {
+    enter_with_view(None)
+}
+
+/// Isolate namespaces, then optionally the filesystem view, then drop caps.
+pub(super) fn enter_with_view(view: Option<&crate::view::ViewPlan>) -> io::Result<()> {
     // SAFETY: `unshare` is async-signal-safe. `CLONE_NEWUSER` requires a
     // single-threaded process; `pre_exec` runs after fork.
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
@@ -48,9 +53,12 @@ pub(super) fn enter() -> io::Result<()> {
     if unsafe { libc::unshare(rest) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    remount_shm()?;
+    if let Some(view) = view {
+        crate::view::apply(view)?;
+    }
     become_pid1()?;
     remount_proc()?;
-    remount_shm()?;
     drop_privileges()?;
     Ok(())
 }

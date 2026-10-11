@@ -98,6 +98,12 @@ child is PID 1 and does not see host processes or host IPC objects.
 The host must allow unprivileged user namespaces; otherwise `health`
 is an error and `prepare` returns `Error::Unavailable`.
 
+`FilesystemView::Isolate` (requires isolate namespaces) bind-mounts
+inputs read-only, puts scratch on tmpfs, and overlays the output tree.
+`OverlayPersist::Discard` throws those writes away with the namespace;
+`Keep(path)` stores them under `path/upper`. After pivot, paths outside
+the view are gone (`ENOENT`), not merely denied.
+
 `pre_exec` code is async-signal-safe: no allocation, locks, or logging.
 
 ## What is not enforced
@@ -109,8 +115,7 @@ is an error and `prepare` returns `Error::Unavailable`.
 - Real isolation on non-Linux hosts. `linux_native` is unsupported there;
   `rlimit` still applies Unix resource limits.
 - A guest adapter. ADR 0003 is the interface only.
-- Syscall allowlists beyond the socket gate, and filesystem views
-  (bind, tmpfs, overlay). Those are later work.
+- Syscall allowlists beyond the socket gate. Those are later work.
 
 ## Recommended settings
 
