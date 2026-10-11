@@ -44,40 +44,45 @@ fn run_report_rejects_zero_schema_version() {
 #[cfg(feature = "tracing")]
 #[test]
 fn prepare_apply_finish_emit_tracing_spans() {
-    use std::io::Write;
     use std::sync::{Arc, Mutex};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
 
-    #[derive(Clone, Default)]
-    struct Buf(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Buf {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+    struct Names {
+        names: Arc<Mutex<Vec<&'static str>>>,
+        next: Mutex<u64>,
     }
 
-    let buf = Buf::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW)
-        .with_writer({
-            let buf = buf.clone();
-            move || buf.clone()
-        })
-        .with_ansi(false)
-        .finish();
+    impl Subscriber for Names {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, span: &Attributes<'_>) -> Id {
+            self.names.lock().unwrap().push(span.metadata().name());
+            let mut next = self.next.lock().unwrap();
+            *next += 1;
+            Id::from_u64(*next)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, _: &Event<'_>) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    let names = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = Names {
+        names: Arc::clone(&names),
+        next: Mutex::new(0),
+    };
     tracing::subscriber::with_default(subscriber, || {
         let sandbox = Sandbox::prepare(&Settings::default(), ".").expect("prepare");
         let mut command = std::process::Command::new("true");
         sandbox.apply(&mut command).expect("apply");
         let _ = sandbox.finish();
     });
-    let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    let got = names.lock().unwrap().clone();
     for name in ["kekkai.prepare", "kekkai.apply", "kekkai.finish"] {
-        assert!(text.contains(name), "missing span {name} in {text}");
+        assert!(got.contains(&name), "missing span {name} in {got:?}");
     }
 }

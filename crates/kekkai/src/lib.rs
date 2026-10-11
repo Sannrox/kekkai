@@ -894,11 +894,9 @@ impl Sandbox {
     /// `root` is the workspace directory. Under `linux_native` it is the
     /// writable output when [`Settings::output`] is `None`. Path roles come
     /// from [`Settings`].
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(name = "kekkai.prepare", skip_all, fields(backend = %settings.backend))
-    )]
     pub fn prepare(settings: &Settings, root: impl AsRef<Path>) -> Result<Self, Error> {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::info_span!("kekkai.prepare", backend = %settings.backend).entered();
         let started = Instant::now();
         validate(settings)?;
         check_path_roles(settings, root.as_ref())?;
@@ -998,11 +996,9 @@ impl Sandbox {
     }
 
     /// Install `pre_exec` hooks on a standard library command.
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(name = "kekkai.apply", skip_all, fields(backend = %self.settings.backend))
-    )]
     pub fn apply(&self, command: &mut Command) -> Result<(), Error> {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::info_span!("kekkai.apply", backend = %self.settings.backend).entered();
         let started = Instant::now();
         let result = match self.settings.backend {
             Backend::None => Ok(()),
@@ -1389,11 +1385,16 @@ impl Sandbox {
     }
 
     /// Read cgroup events after the child exits. Empty when no cgroup was used.
-    #[cfg_attr(
-        feature = "tracing",
-        tracing::instrument(name = "kekkai.finish", skip_all)
-    )]
     pub fn finish(&self) -> ChildUsage {
+        #[cfg(feature = "tracing")]
+        {
+            tracing::info_span!("kekkai.finish").in_scope(|| self.finish_inner())
+        }
+        #[cfg(not(feature = "tracing"))]
+        self.finish_inner()
+    }
+
+    fn finish_inner(&self) -> ChildUsage {
         #[cfg(target_os = "linux")]
         {
             let mut usage = self
