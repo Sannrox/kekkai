@@ -248,6 +248,7 @@ pub(super) enum SocketPolicy {
     UnixOnly,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply(
     command: &mut Command,
     limits: Limits,
@@ -256,10 +257,16 @@ pub(super) fn apply(
     prepared: Arc<LinuxPrepared>,
     notif_sock: Option<RawFd>,
     isolate: bool,
+    view: Option<Arc<crate::view::ViewPlan>>,
 ) -> Result<(), Error> {
-    command.env("TMPDIR", &prepared.scratch);
-    command.env("TMP", &prepared.scratch);
-    command.env("TEMP", &prepared.scratch);
+    let tmpdir = if view.is_some() {
+        prepared.scratch.join("tmp")
+    } else {
+        prepared.scratch.clone()
+    };
+    command.env("TMPDIR", &tmpdir);
+    command.env("TMP", &tmpdir);
+    command.env("TEMP", &tmpdir);
     let abi = probe_abi().unwrap_or(MIN_ABI);
 
     // SAFETY: `pre_exec` runs between fork and exec. The closure only
@@ -272,8 +279,11 @@ pub(super) fn apply(
             }
             crate::join_cgroup(cgroup_procs_fd)?;
             if isolate {
-                crate::ns::enter()?;
+                crate::ns::enter_with_view(view.as_deref())?;
                 add_proc_rule(prepared.ruleset.as_raw_fd(), abi)?;
+                if let Some(plan) = view.as_ref() {
+                    add_view_rules(prepared.ruleset.as_raw_fd(), abi, plan)?;
+                }
             }
             // CLOEXEC extras before rlimits: lowering RLIMIT_NOFILE does
             // not close already-open fds, and the fallback walks 3..cur.
@@ -310,6 +320,43 @@ fn add_proc_rule(ruleset_fd: i32, abi: u32) -> io::Result<()> {
         parent_fd: fd,
     };
     // SAFETY: `attr` names an O_PATH fd we own for this syscall.
+    let rc = unsafe {
+        libc::syscall(
+            SYS_landlock_add_rule,
+            ruleset_fd,
+            LANDLOCK_RULE_PATH_BENEATH,
+            std::ptr::addr_of_mut!(attr),
+            0u32,
+        )
+    };
+    unsafe {
+        libc::close(fd);
+    }
+    if rc != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn add_view_rules(ruleset_fd: i32, abi: u32, plan: &crate::view::ViewPlan) -> io::Result<()> {
+    let write_dir = handled_fs(abi) & !ACCESS_FS_MAKE_CHAR & !ACCESS_FS_MAKE_BLOCK;
+    for path in plan.landlock_paths() {
+        add_cstr_rule(ruleset_fd, path, write_dir, abi)?;
+    }
+    Ok(())
+}
+
+fn add_cstr_rule(ruleset_fd: i32, path: &std::ffi::CStr, access: u64, abi: u32) -> io::Result<()> {
+    // SAFETY: O_PATH open of a view path after overlay/tmpfs; closed below.
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut attr = PathBeneathAttr {
+        allowed_access: access & handled_fs(abi),
+        parent_fd: fd,
+    };
     let rc = unsafe {
         libc::syscall(
             SYS_landlock_add_rule,

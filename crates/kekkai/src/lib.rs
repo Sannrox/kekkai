@@ -46,6 +46,8 @@ mod notif;
 mod ns;
 #[cfg(target_os = "linux")]
 mod proxy;
+#[cfg(target_os = "linux")]
+mod view;
 
 pub use capture::StreamCapture;
 
@@ -212,6 +214,33 @@ pub enum Namespaces {
     Isolate,
 }
 
+/// Mount-namespace filesystem view. Requires [`Namespaces::Isolate`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum FilesystemView {
+    /// Host tree, filtered by Landlock only. This is the default.
+    #[default]
+    Host,
+    /// Read-only binds for inputs, tmpfs scratch, overlay on the output
+    /// tree, then a new root so paths outside the view are gone.
+    Isolate {
+        /// Whether overlay writes persist on the host.
+        overlay: OverlayPersist,
+    },
+}
+
+/// Where overlay upperdir lives for [`FilesystemView::Isolate`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum OverlayPersist {
+    /// Upperdir is tmpfs. Writes vanish with the mount namespace.
+    #[default]
+    Discard,
+    /// Upperdir is this host directory (`upper/` and `work/` are created).
+    /// Writes survive the child.
+    Keep(PathBuf),
+}
+
 /// Unix resource limits applied in the child before exec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Limits {
@@ -267,6 +296,8 @@ pub struct Settings {
     pub cgroup_root: Option<PathBuf>,
     /// Opt-in process namespaces. Requires `rlimit` or `linux_native`.
     pub namespaces: Namespaces,
+    /// Isolated filesystem view. Requires [`Namespaces::Isolate`].
+    pub filesystem_view: FilesystemView,
 }
 
 impl Settings {
@@ -343,6 +374,12 @@ impl SettingsBuilder {
         self
     }
 
+    /// Isolated filesystem view.
+    pub fn filesystem_view(mut self, filesystem_view: FilesystemView) -> Self {
+        self.inner.filesystem_view = filesystem_view;
+        self
+    }
+
     /// Finish the builder.
     pub fn build(self) -> Settings {
         self.inner
@@ -377,6 +414,8 @@ pub struct Capabilities {
     pub seccomp_user_notif: bool,
     /// Unprivileged user namespaces can be created for isolate mode.
     pub user_namespaces: bool,
+    /// Overlayfs, tmpfs, and pivot_root work inside isolate namespaces.
+    pub filesystem_view: bool,
 }
 
 /// Failure to prepare or apply a sandbox.
@@ -477,6 +516,11 @@ pub fn capabilities() -> Capabilities {
     #[cfg(not(target_os = "linux"))]
     let user_namespaces = false;
 
+    #[cfg(target_os = "linux")]
+    let filesystem_view = view::probe().is_ok();
+    #[cfg(not(target_os = "linux"))]
+    let filesystem_view = false;
+
     Capabilities {
         rlimit,
         landlock_abi,
@@ -484,6 +528,7 @@ pub fn capabilities() -> Capabilities {
         cgroup,
         seccomp_user_notif,
         user_namespaces,
+        filesystem_view,
     }
 }
 
@@ -516,7 +561,7 @@ pub fn health(settings: &Settings) -> Health {
         }
         _ => backend,
     };
-    match (&with_cgroup, namespace_health(settings)) {
+    let with_ns = match (&with_cgroup, namespace_health(settings)) {
         (_, Some(Health::Error(message))) => Health::Error(message),
         (Health::Error(_), _) => with_cgroup,
         (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
@@ -524,6 +569,15 @@ pub fn health(settings: &Settings) -> Health {
             Health::Warning(format!("{base}; {extra}"))
         }
         _ => with_cgroup,
+    };
+    match (&with_ns, view_health(settings)) {
+        (_, Some(Health::Error(message))) => Health::Error(message),
+        (Health::Error(_), _) => with_ns,
+        (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
+        (Health::Warning(base), Some(Health::Ok(extra))) => {
+            Health::Warning(format!("{base}; {extra}"))
+        }
+        _ => with_ns,
     }
 }
 
@@ -547,6 +601,44 @@ fn namespace_health(settings: &Settings) -> Option<Health> {
     {
         Some(Health::Error(
             "namespace isolate is supported only on Linux".into(),
+        ))
+    }
+}
+
+fn view_health(settings: &Settings) -> Option<Health> {
+    if matches!(settings.filesystem_view, FilesystemView::Host) {
+        return None;
+    }
+    if matches!(settings.namespaces, Namespaces::Off) {
+        return Some(Health::Error(
+            "filesystem view requires namespace isolate".into(),
+        ));
+    }
+    if matches!(settings.backend, Backend::None) {
+        return Some(Health::Error(
+            "filesystem view requires backend rlimit or linux_native".into(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(match view::probe() {
+            Ok(()) => {
+                let overlay = match &settings.filesystem_view {
+                    FilesystemView::Isolate { overlay } => match overlay {
+                        OverlayPersist::Discard => "discard",
+                        OverlayPersist::Keep(_) => "keep",
+                    },
+                    FilesystemView::Host => "host",
+                };
+                Health::Ok(format!("view=isolate overlay={overlay} ro-bind tmpfs"))
+            }
+            Err(error) => Health::Error(error.to_string()),
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some(Health::Error(
+            "filesystem view is supported only on Linux".into(),
         ))
     }
 }
@@ -637,6 +729,8 @@ pub struct Sandbox {
     proxy: Option<Arc<proxy::EgressProxy>>,
     #[cfg(target_os = "linux")]
     notif: Mutex<Vec<Arc<notif::ViolationCollector>>>,
+    #[cfg(target_os = "linux")]
+    view: Option<Arc<view::ViewPlan>>,
 }
 
 impl Sandbox {
@@ -685,6 +779,44 @@ impl Sandbox {
             }
             _ => None,
         };
+        #[cfg(target_os = "linux")]
+        let view = match &settings.filesystem_view {
+            FilesystemView::Host => None,
+            FilesystemView::Isolate { overlay } => {
+                let overlay_target = match &settings.output {
+                    Some(path) => path.clone(),
+                    None => root.as_ref().to_path_buf(),
+                };
+                let (scratch, owned_scratch) = match &linux {
+                    Some(prepared) => (prepared.scratch.clone(), None),
+                    None => {
+                        let nanos = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0);
+                        let path = std::env::temp_dir()
+                            .join(format!("kekkai-view-{}-{nanos}", std::process::id()));
+                        fs::create_dir_all(&path).map_err(|error| {
+                            Error::invalid(format!("filesystem view scratch: {error}"))
+                        })?;
+                        let path = fs::canonicalize(&path).map_err(|error| {
+                            Error::invalid(format!("filesystem view scratch: {error}"))
+                        })?;
+                        (path.clone(), Some(path))
+                    }
+                };
+                Some(Arc::new(view::prepare(
+                    &overlay_target,
+                    overlay,
+                    &scratch,
+                    &settings.inputs,
+                    &settings.readable_roots,
+                    &settings.writable_roots,
+                    &[],
+                    owned_scratch,
+                )?))
+            }
+        };
         #[cfg(not(target_os = "linux"))]
         let _ = root;
         Ok(Self {
@@ -697,6 +829,8 @@ impl Sandbox {
             proxy,
             #[cfg(target_os = "linux")]
             notif: Mutex::new(Vec::new()),
+            #[cfg(target_os = "linux")]
+            view,
         })
     }
 
@@ -722,6 +856,8 @@ impl Sandbox {
         let limits = rlimit_values(&self.settings);
         let cgroup_fd = self.cgroup_procs_fd();
         let isolate = matches!(self.settings.namespaces, Namespaces::Isolate);
+        #[cfg(target_os = "linux")]
+        let view = self.view.clone();
         // SAFETY: `pre_exec` runs between fork and exec. The closure only
         // performs async-signal-safe libc calls and does not allocate.
         unsafe {
@@ -732,7 +868,7 @@ impl Sandbox {
                 join_cgroup(cgroup_fd)?;
                 #[cfg(target_os = "linux")]
                 if isolate {
-                    ns::enter()?;
+                    ns::enter_with_view(view.as_deref())?;
                 }
                 #[cfg(not(target_os = "linux"))]
                 let _ = isolate;
@@ -791,6 +927,7 @@ impl Sandbox {
             prepared,
             notif_sock,
             matches!(self.settings.namespaces, Namespaces::Isolate),
+            self.view.clone(),
         )
     }
 
@@ -1209,6 +1346,26 @@ fn validate(settings: &Settings) -> Result<(), Error> {
             "namespace isolate requires backend rlimit or linux_native",
         ));
     }
+    if !matches!(settings.filesystem_view, FilesystemView::Host) {
+        if matches!(settings.namespaces, Namespaces::Off) {
+            return Err(Error::invalid("filesystem view requires namespace isolate"));
+        }
+        if matches!(settings.backend, Backend::None) {
+            return Err(Error::invalid(
+                "filesystem view requires backend rlimit or linux_native",
+            ));
+        }
+    }
+    if let FilesystemView::Isolate {
+        overlay: OverlayPersist::Keep(path),
+    } = &settings.filesystem_view
+        && !path.is_absolute()
+    {
+        return Err(Error::invalid(format!(
+            "overlay keep `{}` must be an absolute path",
+            path.display()
+        )));
+    }
     match &settings.network {
         Network::Allowlist(hosts) => {
             if !matches!(settings.backend, Backend::LinuxNative) {
@@ -1620,7 +1777,21 @@ mod tests {
             assert!(!caps.cgroup);
             assert!(!caps.seccomp_user_notif);
             assert!(!caps.user_namespaces);
+            assert!(!caps.filesystem_view);
         }
+    }
+
+    #[test]
+    fn filesystem_view_without_namespaces_is_invalid() {
+        let settings = Settings {
+            backend: Backend::Rlimit,
+            filesystem_view: FilesystemView::Isolate {
+                overlay: OverlayPersist::Discard,
+            },
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("filesystem view"), "{error}");
     }
 
     #[test]
