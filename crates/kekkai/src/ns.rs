@@ -4,6 +4,7 @@
 //! needs a fork after `unshare`: the original child waits and `_exit`s, the
 //! grandchild is PID 1 and execs.
 
+use std::ffi::CStr;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
@@ -16,7 +17,7 @@ pub(super) fn probe() -> Result<(), Error> {
     let mut command = Command::new("true");
     // SAFETY: probe child only; `enter` is async-signal-safe.
     unsafe {
-        command.pre_exec(|| enter());
+        command.pre_exec(enter);
     }
     match command.status() {
         Ok(status) if status.success() => Ok(()),
@@ -55,16 +56,16 @@ pub(super) fn enter() -> io::Result<()> {
 }
 
 fn write_id_maps() -> io::Result<()> {
-    write_file(b"/proc/self/setgroups\0", b"deny")?;
+    write_file(c"/proc/self/setgroups", b"deny")?;
     // SAFETY: getuid/getgid are async-signal-safe.
     let uid = unsafe { libc::getuid() } as u32;
     let gid = unsafe { libc::getgid() } as u32;
-    write_map(b"/proc/self/uid_map\0", uid)?;
-    write_map(b"/proc/self/gid_map\0", gid)?;
+    write_map(c"/proc/self/uid_map", uid)?;
+    write_map(c"/proc/self/gid_map", gid)?;
     Ok(())
 }
 
-fn write_map(path: &[u8], outer: libc::uid_t) -> io::Result<()> {
+fn write_map(path: &CStr, outer: libc::uid_t) -> io::Result<()> {
     let mut buf = [0u8; 32];
     buf[0] = b'0';
     buf[1] = b' ';
@@ -94,10 +95,10 @@ fn u32_dec(mut n: u32, out: &mut [u8]) -> usize {
     len
 }
 
-fn write_file(path: &[u8], data: &[u8]) -> io::Result<()> {
-    // SAFETY: `path` is a NUL-terminated literal; open/write/close are
+fn write_file(path: &CStr, data: &[u8]) -> io::Result<()> {
+    // SAFETY: `path` is a static C string; open/write/close are
     // async-signal-safe.
-    let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_WRONLY | libc::O_CLOEXEC) };
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -235,7 +236,7 @@ fn remount_proc() -> io::Result<()> {
     let rc = unsafe {
         libc::mount(
             std::ptr::null(),
-            b"/\0".as_ptr().cast(),
+            c"/".as_ptr(),
             std::ptr::null(),
             libc::MS_REC | libc::MS_PRIVATE,
             std::ptr::null(),
@@ -246,9 +247,9 @@ fn remount_proc() -> io::Result<()> {
     }
     let rc = unsafe {
         libc::mount(
-            b"proc\0".as_ptr().cast(),
-            b"/proc\0".as_ptr().cast(),
-            b"proc\0".as_ptr().cast(),
+            c"proc".as_ptr(),
+            c"/proc".as_ptr(),
+            c"proc".as_ptr(),
             0,
             std::ptr::null(),
         )
@@ -261,15 +262,15 @@ fn remount_proc() -> io::Result<()> {
 }
 
 fn remount_shm() -> io::Result<()> {
-    let shm = b"/dev/shm\0";
+    let shm = c"/dev/shm";
     // SAFETY: overlay a private tmpfs so POSIX shm is not the host's.
     let rc = unsafe {
         libc::mount(
-            b"tmpfs\0".as_ptr().cast(),
-            shm.as_ptr().cast(),
-            b"tmpfs\0".as_ptr().cast(),
+            c"tmpfs".as_ptr(),
+            shm.as_ptr(),
+            c"tmpfs".as_ptr(),
             libc::MS_NOSUID | libc::MS_NODEV,
-            b"mode=1777\0".as_ptr().cast(),
+            c"mode=1777".as_ptr().cast(),
         )
     };
     if rc == 0 {
@@ -280,7 +281,7 @@ fn remount_shm() -> io::Result<()> {
         return Err(err);
     }
     // SAFETY: create the mount point if the host has no /dev/shm.
-    if unsafe { libc::mkdir(shm.as_ptr().cast(), 0o1777) } != 0 {
+    if unsafe { libc::mkdir(shm.as_ptr(), 0o1777) } != 0 {
         let mkdir_err = io::Error::last_os_error();
         if mkdir_err.raw_os_error() != Some(libc::EEXIST) {
             return Err(mkdir_err);
@@ -288,11 +289,11 @@ fn remount_shm() -> io::Result<()> {
     }
     let rc = unsafe {
         libc::mount(
-            b"tmpfs\0".as_ptr().cast(),
-            shm.as_ptr().cast(),
-            b"tmpfs\0".as_ptr().cast(),
+            c"tmpfs".as_ptr(),
+            shm.as_ptr(),
+            c"tmpfs".as_ptr(),
             libc::MS_NOSUID | libc::MS_NODEV,
-            b"mode=1777\0".as_ptr().cast(),
+            c"mode=1777".as_ptr().cast(),
         )
     };
     if rc != 0 {

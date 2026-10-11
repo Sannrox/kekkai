@@ -298,7 +298,7 @@ fn add_proc_rule(ruleset_fd: i32, abi: u32) -> io::Result<()> {
     // SAFETY: O_PATH open of `/proc` after remount; fd is closed below.
     let fd = unsafe {
         libc::open(
-            b"/proc\0".as_ptr().cast(),
+            c"/proc".as_ptr(),
             libc::O_PATH | libc::O_CLOEXEC | libc::O_DIRECTORY,
         )
     };

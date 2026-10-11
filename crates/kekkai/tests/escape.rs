@@ -7,8 +7,13 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, MutexGuard};
 
 use kekkai::{Backend, Health, Sandbox, Settings};
+
+/// `inherit_fd` dup2s onto a fixed parent fd. Parallel `Command::output`
+/// pipes in this binary must not land on that same number.
+static ESCAPE_LOCK: Mutex<()> = Mutex::new(());
 
 fn skip(reason: &str) {
     eprintln!("skip: {reason}");
@@ -18,11 +23,19 @@ fn probe_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_kekkai-probe"))
 }
 
-fn linux_native_ready() -> Option<(Settings, tempfile::TempDir, PathBuf)> {
+fn linux_native_ready() -> Option<(
+    MutexGuard<'static, ()>,
+    Settings,
+    tempfile::TempDir,
+    PathBuf,
+)> {
     if !cfg!(target_os = "linux") {
         skip("escape tests require Linux");
         return None;
     }
+    let guard = ESCAPE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("ws");
     fs::create_dir_all(&workspace).unwrap();
@@ -33,7 +46,7 @@ fn linux_native_ready() -> Option<(Settings, tempfile::TempDir, PathBuf)> {
         .to_path_buf();
     settings.readable_roots.push(probe_dir);
     match kekkai::health(&settings) {
-        Health::Ok(_) => Some((settings, tmp, workspace)),
+        Health::Ok(_) => Some((guard, settings, tmp, workspace)),
         Health::Warning(message) | Health::Error(message) => {
             skip(&format!("linux_native unavailable: {message}"));
             None
@@ -70,7 +83,7 @@ fn denied(output: &Output, what: &str) {
 
 #[test]
 fn symlink_to_outside_path_is_denied() {
-    let Some((settings, tmp, workspace)) = linux_native_ready() else {
+    let Some((_lock, settings, tmp, workspace)) = linux_native_ready() else {
         return;
     };
     let secret = tmp.path().join("secret.txt");
@@ -99,7 +112,7 @@ fn symlink_to_outside_path_is_denied() {
 
 #[test]
 fn dotdot_write_outside_workspace_is_denied() {
-    let Some((settings, tmp, workspace)) = linux_native_ready() else {
+    let Some((_lock, settings, tmp, workspace)) = linux_native_ready() else {
         return;
     };
     let outside = tmp.path().join("outside.txt");
@@ -116,7 +129,7 @@ fn dotdot_write_outside_workspace_is_denied() {
 
 #[test]
 fn proc_self_root_outside_path_is_denied() {
-    let Some((mut settings, tmp, workspace)) = linux_native_ready() else {
+    let Some((_lock, mut settings, tmp, workspace)) = linux_native_ready() else {
         return;
     };
     // Grant /proc so the open can walk the magic link; the outside inode
@@ -137,7 +150,7 @@ fn proc_self_root_outside_path_is_denied() {
 
 #[test]
 fn ptrace_is_denied() {
-    let Some((settings, _tmp, workspace)) = linux_native_ready() else {
+    let Some((_lock, settings, _tmp, workspace)) = linux_native_ready() else {
         return;
     };
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
@@ -147,7 +160,7 @@ fn ptrace_is_denied() {
 
 #[test]
 fn io_uring_setup_is_denied() {
-    let Some((settings, _tmp, workspace)) = linux_native_ready() else {
+    let Some((_lock, settings, _tmp, workspace)) = linux_native_ready() else {
         return;
     };
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
@@ -157,7 +170,7 @@ fn io_uring_setup_is_denied() {
 
 #[test]
 fn missing_binary_is_a_spawn_error() {
-    let Some((settings, _tmp, workspace)) = linux_native_ready() else {
+    let Some((_lock, settings, _tmp, workspace)) = linux_native_ready() else {
         return;
     };
     let sandbox = Sandbox::prepare(&settings, &workspace).expect("prepare");
@@ -201,12 +214,12 @@ fn inherit_fd(path: &std::path::Path, fd: i32) {
 }
 
 fn inherited_fd_denied(fd: i32, open_files: Option<u64>) {
-    let Some((mut settings, tmp, workspace)) = linux_native_ready() else {
+    let Some((_lock, mut settings, tmp, workspace)) = linux_native_ready() else {
         return;
     };
     #[cfg(not(unix))]
     {
-        let _ = (settings, tmp, workspace, fd, open_files);
+        let _ = (_lock, settings, tmp, workspace, fd, open_files);
         skip("inherited fd test requires Unix");
     }
     #[cfg(unix)]
@@ -232,7 +245,7 @@ fn inherited_fd_denied(fd: i32, open_files: Option<u64>) {
 
 #[test]
 fn abstract_unix_connect_is_denied() {
-    let Some((settings, _tmp, workspace)) = linux_native_ready() else {
+    let Some((_lock, settings, _tmp, workspace)) = linux_native_ready() else {
         return;
     };
     let abi = kekkai::capabilities().landlock_abi.unwrap_or(0);
@@ -242,7 +255,7 @@ fn abstract_unix_connect_is_denied() {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (settings, workspace);
+        let _ = (_lock, settings, workspace);
         skip("abstract unix test requires Linux");
     }
     #[cfg(target_os = "linux")]
