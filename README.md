@@ -20,7 +20,8 @@ Not yet published to crates.io.
 - **No network by default:** a seccomp filter denies socket creation.
   `Network::Allow` leaves sockets to the host; filesystem rules still apply.
   `Network::Allowlist` permits listed hosts through a parent CONNECT proxy
-  on a unix socket; direct IP sockets fail.
+  on a unix socket; direct IP sockets fail. `Network::Loopback` places the
+  child in a private network namespace with only loopback up.
 - **Resource limits:** rlimits, plus opt-in cgroup v2 `memory.max`,
   `pids.max`, and `cpu.max` when a delegated subtree is available.
   Requesting cgroup limits without one is an error, never a fallback to
@@ -38,7 +39,8 @@ Not yet published to crates.io.
   survive `exec`; `ptrace` is denied. `Namespaces::Isolate` is opt-in
   user/mount/PID/IPC/UTS namespaces when the host allows them.
   `FilesystemView::Isolate` adds read-only binds, tmpfs scratch, and an
-  overlay whose writes are discarded or kept.
+  overlay whose writes are discarded or kept. `Network::Loopback` adds a
+  private network namespace with only loopback up.
 
 Guest isolation (userspace kernel or KVM microVM) is an accepted
 interface, not a shipped adapter: [ADR 0003](docs/decisions/0003-guest-backend-interface.md).

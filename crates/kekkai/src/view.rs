@@ -115,7 +115,7 @@ pub(super) fn probe() -> Result<(), Error> {
     let mut command = Command::new("true");
     // SAFETY: probe child only; enter_with_view is async-signal-safe.
     unsafe {
-        command.pre_exec(move || crate::ns::enter_with_view(Some(&plan)));
+        command.pre_exec(move || crate::ns::enter_with_view(Some(&plan), false));
     }
     let result = match command.status() {
         Ok(status) if status.success() => Ok(()),

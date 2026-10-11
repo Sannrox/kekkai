@@ -87,6 +87,10 @@ pub enum Network {
     /// socket in scratch and injects `*_PROXY` environment variables.
     /// Direct IP sockets fail. Requires Landlock ABI 6.
     Allowlist(Vec<AllowHost>),
+    /// Private network namespace with only loopback up. Requires
+    /// [`Namespaces::Isolate`]. Host routes and host abstract unix sockets
+    /// are gone. Loopback works. Missing netns support is [`Error::Unavailable`].
+    Loopback,
 }
 
 /// One host (and optional port) permitted through [`Network::Allowlist`].
@@ -288,7 +292,9 @@ pub struct Settings {
     /// Scratch is always writable. The workspace root is writable when
     /// [`Self::output`] is `None` or names that same path.
     pub writable_roots: Vec<PathBuf>,
-    /// Socket creation policy under `linux_native`. Ignored by other backends.
+    /// Socket and network-namespace policy. `Deny`, `Allow`, and `Allowlist`
+    /// apply under `linux_native`. `Loopback` also requires isolate namespaces
+    /// on `rlimit` or `linux_native`.
     pub network: Network,
     /// Opt-in cgroup v2 limits. Requires `rlimit` or `linux_native`.
     pub cgroup: CgroupLimits,
@@ -416,6 +422,8 @@ pub struct Capabilities {
     pub user_namespaces: bool,
     /// Overlayfs, tmpfs, and pivot_root work inside isolate namespaces.
     pub filesystem_view: bool,
+    /// A private network namespace with loopback can be created.
+    pub network_namespace: bool,
 }
 
 /// Failure to prepare or apply a sandbox.
@@ -521,6 +529,11 @@ pub fn capabilities() -> Capabilities {
     #[cfg(not(target_os = "linux"))]
     let filesystem_view = false;
 
+    #[cfg(target_os = "linux")]
+    let network_namespace = ns::probe_loopback().is_ok();
+    #[cfg(not(target_os = "linux"))]
+    let network_namespace = false;
+
     Capabilities {
         rlimit,
         landlock_abi,
@@ -529,6 +542,7 @@ pub fn capabilities() -> Capabilities {
         seccomp_user_notif,
         user_namespaces,
         filesystem_view,
+        network_namespace,
     }
 }
 
@@ -570,7 +584,7 @@ pub fn health(settings: &Settings) -> Health {
         }
         _ => with_cgroup,
     };
-    match (&with_ns, view_health(settings)) {
+    let with_view = match (&with_ns, view_health(settings)) {
         (_, Some(Health::Error(message))) => Health::Error(message),
         (Health::Error(_), _) => with_ns,
         (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
@@ -578,6 +592,15 @@ pub fn health(settings: &Settings) -> Health {
             Health::Warning(format!("{base}; {extra}"))
         }
         _ => with_ns,
+    };
+    match (&with_view, loopback_health(settings)) {
+        (_, Some(Health::Error(message))) => Health::Error(message),
+        (Health::Error(_), _) => with_view,
+        (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
+        (Health::Warning(base), Some(Health::Ok(extra))) => {
+            Health::Warning(format!("{base}; {extra}"))
+        }
+        _ => with_view,
     }
 }
 
@@ -643,6 +666,35 @@ fn view_health(settings: &Settings) -> Option<Health> {
     }
 }
 
+fn loopback_health(settings: &Settings) -> Option<Health> {
+    if !matches!(settings.network, Network::Loopback) {
+        return None;
+    }
+    if matches!(settings.namespaces, Namespaces::Off) {
+        return Some(Health::Error(
+            "Network::Loopback requires namespace isolate".into(),
+        ));
+    }
+    if matches!(settings.backend, Backend::None) {
+        return Some(Health::Error(
+            "Network::Loopback requires backend rlimit or linux_native".into(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(match ns::probe_loopback() {
+            Ok(()) => Health::Ok("netns=loopback".into()),
+            Err(error) => Health::Error(error.to_string()),
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some(Health::Error(
+            "Network::Loopback is supported only on Linux".into(),
+        ))
+    }
+}
+
 fn cgroup_health(settings: &Settings) -> Option<Health> {
     if settings.cgroup.is_empty() {
         return None;
@@ -692,6 +744,7 @@ fn linux_native_health(settings: &Settings) -> Health {
                 Network::Allowlist(hosts) => {
                     format!("allowlist={hosts_len}", hosts_len = hosts.len())
                 }
+                Network::Loopback => "loopback".to_string(),
             };
             let violations = if notif::probe_user_notif() {
                 "user_notif"
@@ -856,6 +909,7 @@ impl Sandbox {
         let limits = rlimit_values(&self.settings);
         let cgroup_fd = self.cgroup_procs_fd();
         let isolate = matches!(self.settings.namespaces, Namespaces::Isolate);
+        let loopback = matches!(self.settings.network, Network::Loopback);
         #[cfg(target_os = "linux")]
         let view = self.view.clone();
         // SAFETY: `pre_exec` runs between fork and exec. The closure only
@@ -868,10 +922,10 @@ impl Sandbox {
                 join_cgroup(cgroup_fd)?;
                 #[cfg(target_os = "linux")]
                 if isolate {
-                    ns::enter_with_view(view.as_deref())?;
+                    ns::enter_with_view(view.as_deref(), loopback)?;
                 }
                 #[cfg(not(target_os = "linux"))]
-                let _ = isolate;
+                let _ = (isolate, loopback);
                 apply_rlimit_values(limits)
             });
         }
@@ -906,7 +960,7 @@ impl Sandbox {
             command.env_remove("no_proxy");
         }
         let sockets = match &self.settings.network {
-            Network::Allow => linux::SocketPolicy::Allow,
+            Network::Allow | Network::Loopback => linux::SocketPolicy::Allow,
             Network::Allowlist(_) => linux::SocketPolicy::UnixOnly,
             Network::Deny => linux::SocketPolicy::Deny,
         };
@@ -928,6 +982,7 @@ impl Sandbox {
             notif_sock,
             matches!(self.settings.namespaces, Namespaces::Isolate),
             self.view.clone(),
+            matches!(self.settings.network, Network::Loopback),
         )
     }
 
@@ -1387,6 +1442,18 @@ fn validate(settings: &Settings) -> Result<(), Error> {
                 }
             }
         }
+        Network::Loopback => {
+            if matches!(settings.namespaces, Namespaces::Off) {
+                return Err(Error::invalid(
+                    "Network::Loopback requires namespace isolate",
+                ));
+            }
+            if matches!(settings.backend, Backend::None) {
+                return Err(Error::invalid(
+                    "Network::Loopback requires backend rlimit or linux_native",
+                ));
+            }
+        }
         Network::Deny | Network::Allow => {}
     }
     for (name, value) in [
@@ -1778,7 +1845,19 @@ mod tests {
             assert!(!caps.seccomp_user_notif);
             assert!(!caps.user_namespaces);
             assert!(!caps.filesystem_view);
+            assert!(!caps.network_namespace);
         }
+    }
+
+    #[test]
+    fn loopback_without_namespaces_is_invalid() {
+        let settings = Settings {
+            backend: Backend::Rlimit,
+            network: Network::Loopback,
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("Loopback"), "{error}");
     }
 
     #[test]

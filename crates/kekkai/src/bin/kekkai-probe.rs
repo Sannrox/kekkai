@@ -38,7 +38,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(action) = args.next() else {
         eprintln!(
-            "usage: kekkai-probe write|read|env|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect|ptrace|io-uring|read-fd|connect-abstract ..."
+            "usage: kekkai-probe write|read|env|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect|ptrace|io-uring|read-fd|connect-abstract|loopback ..."
         );
         return ExitCode::from(2);
     };
@@ -299,6 +299,39 @@ fn main() -> ExitCode {
                 }
             }
         }
+        "loopback" => match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(listener) => {
+                let addr = match listener.local_addr() {
+                    Ok(addr) => addr,
+                    Err(error) => {
+                        eprintln!("loopback local_addr: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let accept = std::thread::spawn(move || listener.accept());
+                match std::net::TcpStream::connect(addr) {
+                    Ok(_) => match accept.join() {
+                        Ok(Ok(_)) => ExitCode::SUCCESS,
+                        Ok(Err(error)) => {
+                            eprintln!("loopback accept: {error}");
+                            ExitCode::FAILURE
+                        }
+                        Err(_) => {
+                            eprintln!("loopback accept thread panicked");
+                            ExitCode::FAILURE
+                        }
+                    },
+                    Err(error) => {
+                        eprintln!("loopback connect: {error}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("loopback bind: {error}");
+                ExitCode::FAILURE
+            }
+        },
         "connect-unix" => {
             let Some(path) = args.next() else {
                 return ExitCode::from(2);

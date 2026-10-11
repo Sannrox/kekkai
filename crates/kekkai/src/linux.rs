@@ -258,6 +258,7 @@ pub(super) fn apply(
     notif_sock: Option<RawFd>,
     isolate: bool,
     view: Option<Arc<crate::view::ViewPlan>>,
+    loopback: bool,
 ) -> Result<(), Error> {
     let tmpdir = if view.is_some() {
         prepared.scratch.join("tmp")
@@ -279,7 +280,7 @@ pub(super) fn apply(
             }
             crate::join_cgroup(cgroup_procs_fd)?;
             if isolate {
-                crate::ns::enter_with_view(view.as_deref())?;
+                crate::ns::enter_with_view(view.as_deref(), loopback)?;
                 add_proc_rule(prepared.ruleset.as_raw_fd(), abi)?;
                 if let Some(plan) = view.as_ref() {
                     add_view_rules(prepared.ruleset.as_raw_fd(), abi, plan)?;

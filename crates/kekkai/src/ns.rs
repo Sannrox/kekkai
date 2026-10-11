@@ -36,22 +36,32 @@ pub(super) fn probe() -> Result<(), Error> {
 /// PID namespace with `/proc` remounted. The original `Command` child becomes
 /// a wait-proxy and does not return.
 pub(super) fn enter() -> io::Result<()> {
-    enter_with_view(None)
+    enter_with_view(None, false)
 }
 
-/// Isolate namespaces, then optionally the filesystem view, then drop caps.
-pub(super) fn enter_with_view(view: Option<&crate::view::ViewPlan>) -> io::Result<()> {
+/// Isolate namespaces, optionally a private netns with loopback, then the
+/// filesystem view, then drop caps.
+pub(super) fn enter_with_view(
+    view: Option<&crate::view::ViewPlan>,
+    loopback: bool,
+) -> io::Result<()> {
     // SAFETY: `unshare` is async-signal-safe. `CLONE_NEWUSER` requires a
     // single-threaded process; `pre_exec` runs after fork.
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
         return Err(io::Error::last_os_error());
     }
     write_id_maps()?;
-    let rest = libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
+    let mut rest = libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
+    if loopback {
+        rest |= libc::CLONE_NEWNET;
+    }
     // SAFETY: maps are installed so this process has CAP_SYS_ADMIN in the
     // new user namespace, which is required for the remaining unshares.
     if unsafe { libc::unshare(rest) } != 0 {
         return Err(io::Error::last_os_error());
+    }
+    if loopback {
+        bring_lo_up()?;
     }
     remount_shm()?;
     if let Some(view) = view {
@@ -60,6 +70,75 @@ pub(super) fn enter_with_view(view: Option<&crate::view::ViewPlan>) -> io::Resul
     become_pid1()?;
     remount_proc()?;
     drop_privileges()?;
+    Ok(())
+}
+
+/// True when isolate namespaces plus a private network namespace with
+/// loopback can be created.
+pub(super) fn probe_loopback() -> Result<(), Error> {
+    let mut command = Command::new("true");
+    // SAFETY: probe child only; enter_with_view is async-signal-safe.
+    unsafe {
+        command.pre_exec(|| enter_with_view(None, true));
+    }
+    match command.status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(Error::unavailable(
+            Backend::LinuxNative,
+            format!("loopback netns probe exited {status}"),
+        )),
+        Err(error) => Err(Error::unavailable(
+            Backend::LinuxNative,
+            format!("loopback netns probe: {error}"),
+        )),
+    }
+}
+
+fn bring_lo_up() -> io::Result<()> {
+    // SAFETY: datagram socket used only for ioctl; closed on every path.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `ifreq` is a C ioctl buffer; zeroed is the kernel's empty state.
+    let mut req: libc::ifreq = unsafe { std::mem::zeroed() };
+    let lo = c"lo";
+    for (dst, src) in req.ifr_name.iter_mut().zip(lo.to_bytes_with_nul()) {
+        *dst = *src as libc::c_char;
+    }
+    // SAFETY: `req` is a valid `ifreq` for SIOCGIFFLAGS on `lo`.
+    if unsafe { libc::ioctl(fd, libc::SIOCGIFFLAGS, std::ptr::addr_of_mut!(req)) } != 0 {
+        let err = io::Error::last_os_error();
+        // SAFETY: `fd` is the ioctl socket.
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(err);
+    }
+    // SAFETY: `ifru_flags` is the SIOCGIFFLAGS result we just fetched.
+    let flags = unsafe { req.ifr_ifru.ifru_flags };
+    if flags & libc::IFF_UP as libc::c_short != 0 {
+        // SAFETY: `fd` is the ioctl socket.
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(io::Error::from_raw_os_error(libc::EBUSY));
+    }
+    req.ifr_ifru.ifru_flags =
+        flags | libc::IFF_UP as libc::c_short | libc::IFF_RUNNING as libc::c_short;
+    // SAFETY: `req` holds the flags to apply on `lo`.
+    if unsafe { libc::ioctl(fd, libc::SIOCSIFFLAGS, std::ptr::addr_of_mut!(req)) } != 0 {
+        let err = io::Error::last_os_error();
+        // SAFETY: `fd` is the ioctl socket.
+        unsafe {
+            libc::close(fd);
+        }
+        return Err(err);
+    }
+    // SAFETY: `fd` is the ioctl socket.
+    unsafe {
+        libc::close(fd);
+    }
     Ok(())
 }
 
