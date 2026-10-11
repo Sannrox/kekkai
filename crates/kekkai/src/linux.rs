@@ -234,8 +234,8 @@ pub(super) fn prepare(
         &inputs,
         &readable_roots,
         &writable_roots,
-        &devices,
     )?;
+    add_device_rules(&prepared.ruleset, abi, &devices)?;
     Ok(Arc::new(prepared))
 }
 
@@ -649,7 +649,6 @@ fn add_path_rules(
     inputs: &[PathBuf],
     extra_read_only: &[PathBuf],
     extra_writable: &[PathBuf],
-    devices: &[PathBuf],
 ) -> Result<(), Error> {
     let read_dir = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
     let read_file = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE;
@@ -671,15 +670,20 @@ fn add_path_rules(
     for path in WRITABLE_DEVS {
         add_existing(ruleset, Path::new(path), write_dev | ioctl_bit(abi), abi)?;
     }
-    for path in devices {
-        add_path(ruleset, path, write_dev | ioctl_bit(abi), abi)?;
-    }
     add_path(ruleset, output, write_dir, abi)?;
     add_path(ruleset, scratch, write_dir, abi)?;
     for path in extra_writable {
         if path != output && path != scratch {
             add_path(ruleset, path, write_dir, abi)?;
         }
+    }
+    Ok(())
+}
+
+fn add_device_rules(ruleset: &OwnedFd, abi: u32, devices: &[PathBuf]) -> Result<(), Error> {
+    let access = ACCESS_FS_READ_FILE | ACCESS_FS_WRITE_FILE | truncate_bit(abi) | ioctl_bit(abi);
+    for path in devices {
+        add_path(ruleset, path, access, abi)?;
     }
     Ok(())
 }
