@@ -1,8 +1,10 @@
 # kekkai (結界)
 
-A small Rust library for sandboxing child processes on Linux: a filesystem
-allowlist (Landlock), a syscall and network gate (seccomp), and resource
-limits, applied to a `std::process::Command` before it spawns.
+A small Rust library for sandboxing child processes on Linux and macOS:
+on Linux a filesystem allowlist (Landlock), a syscall and network gate
+(seccomp), and resource limits; on macOS a Seatbelt profile for
+filesystem and network rules. Applied to a `std::process::Command`
+before it spawns.
 
 See the [consumer guide](docs/consumer-guide.md) for backends, `health`,
 recommended settings, and failure modes. Examples live in
@@ -14,13 +16,14 @@ Not yet published to crates.io.
 ## What it does
 
 - **Filesystem allowlist:** the child can read and write only the paths you
-  allow (Landlock, ABI 3 or newer). Named roles: read-only `inputs`, a
-  writable `output` directory (the workspace when unset), and a private
-  per-run scratch dir (`TMPDIR`). Overlapping roles are rejected.
-  Extra device nodes are listed in `Settings.devices`; none are granted
-  by default beyond `/dev/null`, `/dev/zero`, `/dev/urandom`, and
-  `/dev/random`.
-- **No network by default:** a seccomp filter denies socket creation.
+  allow (Landlock ABI 3+ on Linux, Seatbelt on macOS). Named roles:
+  read-only `inputs`, a writable `output` directory (the workspace when
+  unset), and a private per-run scratch dir (`TMPDIR`). Overlapping roles
+  are rejected. Extra device nodes are listed in `Settings.devices` on
+  Linux; none are granted by default beyond `/dev/null`, `/dev/zero`,
+  `/dev/urandom`, and `/dev/random`.
+- **No network by default:** on Linux a seccomp filter denies socket
+  creation; on macOS the Seatbelt profile denies `network*`.
   `Network::Allow` leaves sockets to the host; filesystem rules still apply.
   `Network::Allowlist` permits listed hosts through a parent CONNECT proxy
   on a unix socket; direct IP sockets fail. `Network::Loopback` places the
@@ -32,15 +35,16 @@ Not yet published to crates.io.
   fallback to `RLIMIT_AS`. `Sandbox::usage` snapshots live usage;
   `finish` reports after exit.
 - **Explicit backends:** `none` (development only), `rlimit`,
-  `linux_native`, and `userspace` (opt-in `guest` cargo feature). Selecting
-  a backend the kernel cannot provide is an error, never a silent downgrade.
+  `linux_native`, `macos` (Seatbelt filesystem and network profile), and
+  `userspace` (opt-in `guest` cargo feature). Selecting a backend the
+  kernel cannot provide is an error, never a silent downgrade.
 - **Host detection:** `health` and `capabilities` report which backends the
   running kernel supports. `ChildUsage.violations` records seccomp-denied
   syscalls when user notification is available, and CONNECT denials from
   the egress proxy. Filesystem Landlock denials are reported as unavailable
   until the host exposes an unprivileged event stream.
-- **In-process by default:** `rlimit` and `linux_native` install rules in
-  `pre_exec`, so they work in unprivileged containers. Extra file
+- **In-process by default:** `rlimit`, `linux_native`, and `macos` install
+  rules in `pre_exec`, so they work without a helper. Extra file
   descriptors above stderr do not survive `exec`; `ptrace` is denied.
   `SyscallProfile::Default` is the historical denylist; `Strict` and
   `Python` are per-architecture allowlists. `Namespaces::Isolate` is
@@ -92,7 +96,7 @@ calling thread.
 - Deciding what runs, retries, or auditing. That belongs to the caller.
 - Letting the child open its own IP sockets to listed hosts.
   `Network::Allowlist` is a parent CONNECT proxy on a unix socket.
-- Real isolation on non-Linux platforms.
+- Real isolation on Windows. macOS uses `Backend::Macos`.
 
 Known users: [shikigami](https://github.com/Sannrox/shikigami) (agent tool
 calls), where this code originated, and [kako](https://github.com/Sannrox/kako)

@@ -67,6 +67,26 @@ jobs:
           cargo test --locked --workspace --features tracing
           cargo test --locked --workspace --features guest
 
+  build-and-test-macos:
+    name: Build & Test (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --locked --workspace --all-targets
+      - name: Test
+        run: |
+          cargo test --locked --workspace
+          cargo test --locked --workspace --features tokio
+          cargo test --locked --workspace --features tracing
+          cargo test --locked --workspace --features guest
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest

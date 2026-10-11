@@ -9,6 +9,16 @@ sandbox enforces is listed here.
 
 ### Added
 
+- `macos` backend: Seatbelt filesystem allowlist and network deny/allow,
+  applied in `pre_exec` via `sandbox_init`. Path roles match
+  `linux_native` (`inputs`, `output`, extra roots, scratch `TMPDIR`).
+  System read/exec is `/usr/bin`, `/usr/lib`, `/usr/sbin`, `/usr/libexec`,
+  `/usr/share`, `/bin`, `/sbin`, `/System/Library`, and the root directory inode
+  (not a tree grant; `/usr/local` stays denied). When `output` is set the
+  workspace is not writable. Scratch is an exclusive `0700` directory.
+  `Allowlist`, `Loopback`, namespaces, cgroup, devices, and syscall
+  profiles stay Linux-only (`Error::Invalid`). Missing support is
+  `Error::Unsupported`. CI runs denial tests on a macOS runner.
 - `none`, `rlimit`, and `linux_native` backends: `Settings` in,
   `Sandbox::prepare` out, `apply` on `std::process::Command` before spawn.
 - Landlock filesystem allowlist with ABI 3 as the floor, a seccomp socket
