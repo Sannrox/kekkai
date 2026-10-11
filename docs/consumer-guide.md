@@ -5,6 +5,9 @@ value and a workspace root into `Sandbox::prepare`, then apply the result
 to a `std::process::Command` before spawn (or use a spawn helper). It does
 not schedule work, pick a command, retry, or audit.
 
+Non-Rust callers and debugging can use the `kekkai run` CLI, which is the
+same path: flags or a JSON file become `Settings`, then `prepare` / `spawn`.
+
 ## Backends
 
 Choose one. There is no fallback.
@@ -193,6 +196,35 @@ milliseconds (`prepare_ms`, `apply_ms`, `since_prepare_ms`). Paths are
 omitted. `RunReport::to_json` / `from_json` round-trip. Enable the
 `tracing` cargo feature to emit `kekkai.prepare`, `kekkai.apply`, and
 `kekkai.finish` spans.
+
+## CLI
+
+```bash
+kekkai run [options] -- PROGRAM [ARGS...]
+```
+
+`kekkai run` builds `Settings` from `--settings FILE` (JSON) and flags,
+calls `Sandbox::prepare` on `--workspace` (default: current directory),
+spawns `PROGRAM`, waits, then writes `Sandbox::report()` as JSON.
+
+- Child stdin, stdout, and stderr are inherited.
+- Default report destination is stderr (one JSON object). `--report PATH`
+  writes that file; `--report -` and `--json` write stdout.
+- Exit code is the child's. A signal becomes `128+N`. Usage errors and
+  prepare/apply/spawn/report failures exit 2.
+- Default backend when neither `--backend` nor a settings `backend` key
+  is set: `linux_native` on Linux, `macos` on macOS, `rlimit` elsewhere.
+  A backend the host cannot provide is an error; there is no downgrade.
+- Flags override the file. Repeatable path flags (`--input`, `--readable`,
+  `--writable`, `--device`) append. Allowlist network, cgroup limits, and
+  filesystem view are file-only.
+
+Settings file keys match `Settings`: `backend`, `network` (`deny` /
+`allow` / `loopback` / `{ "allowlist": [{"host":"example.com","port":443}] }`),
+`limits`, `inputs`, `output`, `readable_roots`, `writable_roots`,
+`devices`, `cgroup`, `cgroup_root`, `namespaces`, `filesystem_view`
+(`host` / `{ "isolate": "discard" }` / `{ "isolate": { "keep": "/path" } }`),
+`syscall_profile`, `guest_helper`. Unknown keys are rejected.
 
 ## Failure modes
 
