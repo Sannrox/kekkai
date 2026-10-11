@@ -35,16 +35,22 @@ Call `kekkai::capabilities()` for what this process can enforce, and
   OS) or `Error::Unavailable` (kernel or cgroup missing). Do not spawn.
 
 `Error::Invalid` is a settings mistake (zero limits, relative extra roots,
-cgroup on `none`).
+overlapping path roles, cgroup on `none`).
 
 ## What is enforced
 
 Under `linux_native`:
 
-- The workspace root is writable. Extra `readable_roots` get read and
-  execute. Extra `writable_roots` get read and write. Paths must be
-  absolute. Everything else is denied by Landlock.
-- `TMPDIR` is a scratch directory created for the run.
+- Named path roles: `inputs` are read-only (read and execute). `output`
+  is the writable directory; when unset, the workspace root is the
+  output. Extra `readable_roots` get read and execute. Extra
+  `writable_roots` get read and write. Paths must be absolute.
+  Everything else is denied by Landlock. An input that is the same as,
+  or lives under, a writable role (output, workspace-as-output,
+  `writable_roots`, or scratch) is `Error::Invalid`.
+- `TMPDIR` is a private scratch directory created for the run and
+  removed when the sandbox is dropped. Each `prepare` gets a unique
+  directory.
 - `Network::Deny` (the default) makes `socket()` fail with `EPERM`.
   `Network::Allow` leaves sockets to the host; filesystem rules still apply.
   `Network::Allowlist` allows only `AF_UNIX` sockets, starts a CONNECT
@@ -90,7 +96,7 @@ Overflow is drained so the child cannot fill the pipe.
 ## Recommended settings
 
 **Data transform** (Python/DuckDB): `linux_native`, `Network::Deny`,
-workspace = output directory, `readable_roots` = input directory,
+`inputs` = input directory, `output` or workspace = output directory,
 `cgroup.memory_max` around 512 MiB. See [`examples/transform.rs`](../examples/transform.rs).
 
 **Agent shell command**: `linux_native`, workspace = the run directory,
@@ -107,7 +113,7 @@ this job here", not as a cue to switch backends.
 | --- | --- |
 | `Error::Unsupported` | Backend is not implemented on this OS. |
 | `Error::Unavailable` | Kernel lacks Landlock ABI 3, seccomp, or a delegated cgroup v2 subtree. |
-| `Error::Invalid` | Zero limits, relative roots, cgroup on `none`, `cpu_period_us` without quota. |
+| `Error::Invalid` | Zero limits, relative roots, overlapping path roles, cgroup on `none`, `cpu_period_us` without quota. |
 | Child `EACCES` / Landlock denial | Path not on the allowlist. |
 | Child `EPERM` on `socket()` | `Network::Deny`, or IP sockets under `Allowlist`. |
 | `ChildUsage.violations` with `ViolationKind::Network` | CONNECT to a host/port not on the allowlist. |

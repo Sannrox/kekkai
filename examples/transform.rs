@@ -1,8 +1,8 @@
 //! Read-only inputs, writable output, no sockets, cgroup memory cap.
 //!
 //! Usage: `transform <input-dir> <output-dir>`
-//! Both paths must be absolute. The output directory is the workspace root
-//! (always writable). The input directory is granted read and execute only.
+//! Both paths must be absolute. The input directory is `Settings.inputs`
+//! (read-only). The output directory is `Settings.output`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -25,7 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings {
         backend: Backend::LinuxNative,
         network: Network::Deny,
-        readable_roots: vec![input.clone()],
+        inputs: vec![input.clone()],
+        output: Some(output.clone()),
         cgroup: CgroupLimits {
             memory_max: Some(512 * 1024 * 1024),
             ..CgroupLimits::default()
