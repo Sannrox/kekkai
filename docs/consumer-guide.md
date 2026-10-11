@@ -65,6 +65,14 @@ Under `linux_native`:
 - Rlimits from `Settings.limits` are installed in `pre_exec`.
 - The child is placed in its own process group so timeout and shutdown
   can signal the whole group.
+- Denied syscalls are recorded on `ChildUsage.violations` when seccomp
+  user notification is available (`health` contains
+  `violations=user_notif`, `capabilities.seccomp_user_notif`).
+  `violations_observed` is false when that path is missing; an empty
+  list is then not a clean kernel run. Landlock filesystem denials have
+  no unprivileged observer (`fs_violations=unavailable`). CONNECT
+  denials from `Network::Allowlist` are always recorded as
+  `ViolationKind::Network`.
 
 Under `rlimit`, only rlimits and the process group apply.
 
@@ -117,6 +125,8 @@ this job here", not as a cue to switch backends.
 | Child `EACCES` / Landlock denial | Path not on the allowlist. |
 | Child `EPERM` on `socket()` | `Network::Deny`, or IP sockets under `Allowlist`. |
 | `ChildUsage.violations` with `ViolationKind::Network` | CONNECT to a host/port not on the allowlist. |
+| `ChildUsage.violations` with `ViolationKind::Syscall` | Seccomp denied the named syscall (`socket`, …). |
+| `violations_observed` is false | Kernel denials could not be recorded; do not treat an empty list as a clean run. |
 | `timed_out` | Wall-clock helper expired; the group was killed. |
 | `oom_killed` | cgroup `memory.max` (or `memory.events`) fired. |
 | Truncated capture | Stream exceeded its byte cap; `dropped` is the discarded count. |

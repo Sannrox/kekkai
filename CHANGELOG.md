@@ -48,3 +48,10 @@ sandbox enforces is listed here.
   overlaps a writable role is `Error::Invalid`. Scratch stays a unique
   per-run directory, exported as `TMPDIR`, and is removed when the
   sandbox is dropped.
+- Sandbox violation reporting: seccomp user notification records denied
+  syscalls on `ChildUsage.violations` (`ViolationKind::Syscall`) when
+  the kernel supports it. `violations_observed` is false when the host
+  cannot observe kernel denials, so an empty list is not a clean run.
+  `health` reports `violations=user_notif|unavailable` and
+  `fs_violations=unavailable` (Landlock has no unprivileged denial fd).
+  CONNECT denials remain `ViolationKind::Network`.

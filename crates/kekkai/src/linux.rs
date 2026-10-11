@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -146,7 +146,7 @@ pub(super) fn probe_enforcement() -> Result<u32, Error> {
             if libc::syscall(SYS_landlock_restrict_self, ruleset_fd, 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            let (filter, filter_len) = socket_filter(SocketPolicy::Deny);
+            let (filter, filter_len) = socket_filter(SocketPolicy::Deny, SECCOMP_RET_ERRNO_EPERM);
             let mut prog = libc::sock_fprog {
                 len: filter_len,
                 filter: filter.as_ptr().cast_mut(),
@@ -254,6 +254,7 @@ pub(super) fn apply(
     sockets: SocketPolicy,
     cgroup_procs_fd: Option<i32>,
     prepared: Arc<LinuxPrepared>,
+    notif_sock: Option<RawFd>,
 ) -> Result<(), Error> {
     command.env("TMPDIR", &prepared.scratch);
     command.env("TMP", &prepared.scratch);
@@ -275,23 +276,121 @@ pub(super) fn apply(
             if libc::syscall(SYS_landlock_restrict_self, prepared.ruleset.as_raw_fd(), 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            let (filter, filter_len) = socket_filter(sockets);
-            let mut prog = libc::sock_fprog {
-                len: filter_len,
-                filter: filter.as_ptr().cast_mut(),
-            };
-            if libc::prctl(
-                libc::PR_SET_SECCOMP,
-                libc::SECCOMP_MODE_FILTER,
-                std::ptr::addr_of_mut!(prog),
-            ) != 0
-            {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
+            install_seccomp(sockets, notif_sock)
         });
     }
     Ok(())
+}
+
+fn install_seccomp(sockets: SocketPolicy, notif_sock: Option<RawFd>) -> io::Result<()> {
+    if let Some(sock) = notif_sock {
+        if install_seccomp_listener(sockets, sock).is_ok() {
+            return Ok(());
+        }
+        let _ = send_notif_handshake(sock, 0, None);
+        // SAFETY: child end of the handshake socket; not used after exec.
+        unsafe {
+            libc::close(sock);
+        }
+    }
+    install_seccomp_errno(sockets)
+}
+
+fn install_seccomp_listener(sockets: SocketPolicy, sock: RawFd) -> io::Result<()> {
+    let (filter, filter_len) = socket_filter(sockets, SECCOMP_RET_USER_NOTIF);
+    let mut prog = libc::sock_fprog {
+        len: filter_len,
+        filter: filter.as_ptr().cast_mut(),
+    };
+    // SAFETY: `prog` points at a stack BPF program; NEW_LISTENER returns an
+    // owned notification fd on success.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            crate::notif::SECCOMP_SET_MODE_FILTER_NR,
+            crate::notif::SECCOMP_FILTER_FLAG_NEW_LISTENER_NR,
+            std::ptr::addr_of_mut!(prog),
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let listener = fd as RawFd;
+    let sent = send_notif_handshake(sock, 1, Some(listener));
+    // SAFETY: the listener fd was returned by seccomp; the child must not
+    // keep it. The handshake socket stays open on send failure so the
+    // errno-filter fallback can still signal the parent.
+    unsafe {
+        libc::close(listener);
+    }
+    if sent.is_ok() {
+        unsafe {
+            libc::close(sock);
+        }
+    }
+    sent
+}
+
+fn install_seccomp_errno(sockets: SocketPolicy) -> io::Result<()> {
+    let (filter, filter_len) = socket_filter(sockets, SECCOMP_RET_ERRNO_EPERM);
+    let mut prog = libc::sock_fprog {
+        len: filter_len,
+        filter: filter.as_ptr().cast_mut(),
+    };
+    // SAFETY: `prog` points at a stack BPF program we own for this call.
+    let rc = unsafe {
+        libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            std::ptr::addr_of_mut!(prog),
+        )
+    };
+    if rc != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn send_notif_handshake(sock: RawFd, flag: u8, listener: Option<RawFd>) -> io::Result<()> {
+    let mut dummy = flag;
+    let mut iov = libc::iovec {
+        iov_base: std::ptr::addr_of_mut!(dummy).cast(),
+        iov_len: 1,
+    };
+    let mut cmsg_buf = [0u8; 64];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    if listener.is_some() {
+        msg.msg_control = cmsg_buf.as_mut_ptr().cast();
+        msg.msg_controllen = cmsg_buf.len() as _;
+    }
+    if let Some(fd) = listener {
+        // SAFETY: `msg` has a control buffer large enough for one int fd.
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            if cmsg.is_null() {
+                return Err(io::Error::other("CMSG_FIRSTHDR"));
+            }
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
+            std::ptr::copy_nonoverlapping(
+                std::ptr::addr_of!(fd),
+                libc::CMSG_DATA(cmsg).cast::<RawFd>(),
+                1,
+            );
+            msg.msg_controllen = (*cmsg).cmsg_len;
+        }
+    }
+    // SAFETY: `msg` references stack iov and optional cmsg we own.
+    let n = unsafe { libc::sendmsg(sock, &msg, 0) };
+    if n < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn create_scratch() -> Result<PathBuf, Error> {
@@ -494,6 +593,7 @@ const BPF_K: u16 = 0x00;
 const BPF_RET: u16 = 0x06;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_RET_ERRNO_EPERM: u32 = 0x0005_0000 | (libc::EPERM as u32);
+const SECCOMP_RET_USER_NOTIF: u32 = 0x7fc0_0000;
 /// x32 syscalls share AUDIT_ARCH_X86_64 but set this bit in `nr`.
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
@@ -517,7 +617,7 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
     libc::sock_filter { code, jt, jf, k }
 }
 
-fn socket_filter(sockets: SocketPolicy) -> ([libc::sock_filter; 64], u16) {
+fn socket_filter(sockets: SocketPolicy, deny: u32) -> ([libc::sock_filter; 64], u16) {
     let mut filter = [stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW); 64];
     let mut i = 0;
     let push = |filter: &mut [libc::sock_filter; 64], i: &mut usize, insn: libc::sock_filter| {
@@ -532,11 +632,7 @@ fn socket_filter(sockets: SocketPolicy) -> ([libc::sock_filter; 64], u16) {
         &mut i,
         jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH, 1, 0),
     );
-    push(
-        &mut filter,
-        &mut i,
-        stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
-    );
+    push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
     push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 0));
     // x32 shares AUDIT_ARCH_X86_64; the syscall number has bit 0x40000000 set.
     push(
@@ -544,11 +640,7 @@ fn socket_filter(sockets: SocketPolicy) -> ([libc::sock_filter; 64], u16) {
         &mut i,
         jump(BPF_JMP | BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1),
     );
-    push(
-        &mut filter,
-        &mut i,
-        stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
-    );
+    push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
     if matches!(sockets, SocketPolicy::Deny | SocketPolicy::UnixOnly) {
         if matches!(sockets, SocketPolicy::UnixOnly) {
             // socket(): only AF_UNIX. Direct IP (including raw-IP / DNS bypass)
@@ -564,11 +656,7 @@ fn socket_filter(sockets: SocketPolicy) -> ([libc::sock_filter; 64], u16) {
                 &mut i,
                 jump(BPF_JMP | BPF_JEQ | BPF_K, libc::AF_UNIX as u32, 1, 0),
             );
-            push(
-                &mut filter,
-                &mut i,
-                stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
-            );
+            push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
             push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 0));
         } else {
             push(
@@ -576,11 +664,7 @@ fn socket_filter(sockets: SocketPolicy) -> ([libc::sock_filter; 64], u16) {
                 &mut i,
                 jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_socket as u32, 0, 1),
             );
-            push(
-                &mut filter,
-                &mut i,
-                stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
-            );
+            push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
         }
         // socketpair: only AF_UNIX SOCK_STREAM (pipes, git). Datagram pairs can
         // sendto() a host pathname socket such as /dev/log.
@@ -595,11 +679,7 @@ fn socket_filter(sockets: SocketPolicy) -> ([libc::sock_filter; 64], u16) {
             &mut i,
             jump(BPF_JMP | BPF_JEQ | BPF_K, libc::AF_UNIX as u32, 1, 0),
         );
-        push(
-            &mut filter,
-            &mut i,
-            stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
-        );
+        push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
         push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 24));
         push(&mut filter, &mut i, stmt(BPF_ALU | BPF_AND | BPF_K, 0xf));
         push(
@@ -607,11 +687,7 @@ fn socket_filter(sockets: SocketPolicy) -> ([libc::sock_filter; 64], u16) {
             &mut i,
             jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SOCK_STREAM as u32, 1, 0),
         );
-        push(
-            &mut filter,
-            &mut i,
-            stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
-        );
+        push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
         push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 0));
     }
     // Close alternate socket, signal, and identity-change routes. `setpgid`
@@ -634,11 +710,7 @@ fn socket_filter(sockets: SocketPolicy) -> ([libc::sock_filter; 64], u16) {
             &mut i,
             jump(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1),
         );
-        push(
-            &mut filter,
-            &mut i,
-            stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
-        );
+        push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
     }
 
     push(
@@ -671,18 +743,20 @@ mod tests {
 
     #[test]
     fn socket_filter_fits_the_fixed_program() {
-        let (_filter, len) = socket_filter(SocketPolicy::Deny);
+        let (_filter, len) = socket_filter(SocketPolicy::Deny, SECCOMP_RET_ERRNO_EPERM);
         assert!(len > 8 && len <= 64, "deny sockets len={len}");
-        let (_filter, len) = socket_filter(SocketPolicy::Allow);
+        let (_filter, len) = socket_filter(SocketPolicy::Allow, SECCOMP_RET_ERRNO_EPERM);
         assert!(len > 4 && len <= 64, "allow sockets len={len}");
-        let (_filter, len) = socket_filter(SocketPolicy::UnixOnly);
+        let (_filter, len) = socket_filter(SocketPolicy::UnixOnly, SECCOMP_RET_USER_NOTIF);
         assert!(len > 8 && len <= 64, "unix-only sockets len={len}");
         assert!(
-            socket_filter(SocketPolicy::Deny).1 > socket_filter(SocketPolicy::Allow).1,
+            socket_filter(SocketPolicy::Deny, SECCOMP_RET_ERRNO_EPERM).1
+                > socket_filter(SocketPolicy::Allow, SECCOMP_RET_ERRNO_EPERM).1,
             "denying sockets must add instructions"
         );
         assert!(
-            socket_filter(SocketPolicy::UnixOnly).1 > socket_filter(SocketPolicy::Deny).1,
+            socket_filter(SocketPolicy::UnixOnly, SECCOMP_RET_ERRNO_EPERM).1
+                > socket_filter(SocketPolicy::Deny, SECCOMP_RET_ERRNO_EPERM).1,
             "unix-only must add the AF_UNIX check"
         );
     }

@@ -41,6 +41,7 @@ impl CgroupPrepared {
             cpu_usec: cpu_usage_usec(&self.dir),
             timed_out: false,
             violations: Vec::new(),
+            violations_observed: false,
         }
     }
 
