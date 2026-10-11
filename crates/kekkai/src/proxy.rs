@@ -5,7 +5,7 @@
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -127,7 +127,7 @@ fn handle_client(
         let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
         return;
     }
-    let mut upstream = match connect_upstream(&target.0, target.1) {
+    let upstream = match connect_upstream(&target.0, target.1) {
         Ok(stream) => stream,
         Err(_) => {
             let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
@@ -200,16 +200,18 @@ fn record_denial(denials: &Mutex<Vec<SandboxViolation>>, host: &str, port: u16) 
 }
 
 fn splice(mut a: UnixStream, mut b: TcpStream) {
-    let mut a2 = a.try_clone().ok();
-    let mut b2 = b.try_clone().ok();
+    let Ok(mut a2) = a.try_clone() else {
+        return;
+    };
+    let Ok(mut b2) = b.try_clone() else {
+        return;
+    };
     let up = thread::spawn(move || {
         let _ = io::copy(&mut a, &mut b);
         let _ = b.shutdown(std::net::Shutdown::Write);
     });
-    if let (Some(ref mut a2), Some(ref mut b2)) = (&mut a2, &mut b2) {
-        let _ = io::copy(b2, a2);
-        let _ = a2.shutdown(std::net::Shutdown::Write);
-    }
+    let _ = io::copy(&mut b2, &mut a2);
+    let _ = a2.shutdown(std::net::Shutdown::Write);
     let _ = up.join();
 }
 
