@@ -896,7 +896,15 @@ impl Sandbox {
     /// from [`Settings`].
     pub fn prepare(settings: &Settings, root: impl AsRef<Path>) -> Result<Self, Error> {
         #[cfg(feature = "tracing")]
-        let _span = tracing::info_span!("kekkai.prepare", backend = %settings.backend).entered();
+        {
+            tracing::info_span!("kekkai.prepare", backend = %settings.backend)
+                .in_scope(|| Self::prepare_inner(settings, root))
+        }
+        #[cfg(not(feature = "tracing"))]
+        Self::prepare_inner(settings, root)
+    }
+
+    fn prepare_inner(settings: &Settings, root: impl AsRef<Path>) -> Result<Self, Error> {
         let started = Instant::now();
         validate(settings)?;
         check_path_roles(settings, root.as_ref())?;
@@ -998,7 +1006,15 @@ impl Sandbox {
     /// Install `pre_exec` hooks on a standard library command.
     pub fn apply(&self, command: &mut Command) -> Result<(), Error> {
         #[cfg(feature = "tracing")]
-        let _span = tracing::info_span!("kekkai.apply", backend = %self.settings.backend).entered();
+        {
+            tracing::info_span!("kekkai.apply", backend = %self.settings.backend)
+                .in_scope(|| self.apply_inner(command))
+        }
+        #[cfg(not(feature = "tracing"))]
+        self.apply_inner(command)
+    }
+
+    fn apply_inner(&self, command: &mut Command) -> Result<(), Error> {
         let started = Instant::now();
         let result = match self.settings.backend {
             Backend::None => Ok(()),
