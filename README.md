@@ -29,7 +29,10 @@ Not yet published to crates.io.
   `linux_native`. Selecting a backend the kernel cannot provide is an error,
   never a silent downgrade.
 - **Host detection:** `health` and `capabilities` report which backends the
-  running kernel supports.
+  running kernel supports. `ChildUsage.violations` records seccomp-denied
+  syscalls when user notification is available, and CONNECT denials from
+  the egress proxy. Filesystem Landlock denials are reported as unavailable
+  until the host exposes an unprivileged event stream.
 - **No helper binary, no user namespaces:** rules are installed in
   `pre_exec`, so it works in unprivileged containers.
 

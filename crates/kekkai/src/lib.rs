@@ -26,13 +26,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[cfg(target_os = "linux")]
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 mod capture;
 #[cfg(target_os = "linux")]
 mod cgroup;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod notif;
 #[cfg(target_os = "linux")]
 mod proxy;
 
@@ -89,13 +91,18 @@ pub struct AllowHost {
 pub enum ViolationKind {
     /// The egress proxy refused a CONNECT target.
     Network,
+    /// A Landlock filesystem denial (path in `detail`). Recorded only when
+    /// the host can observe those events.
+    Filesystem,
+    /// A seccomp-denied syscall (name in `detail`).
+    Syscall,
 }
 
 /// One denial class observed for a child.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxViolation {
     pub kind: ViolationKind,
-    /// Host:port for network denials.
+    /// Host:port for network denials, path for filesystem, syscall name otherwise.
     pub detail: String,
     pub count: u64,
 }
@@ -140,8 +147,13 @@ pub struct ChildUsage {
     pub cpu_usec: Option<u64>,
     /// True when [`Sandbox::spawn_with_deadline`] expired the wall-clock limit.
     pub timed_out: bool,
-    /// Denials recorded for this child (egress proxy today).
+    /// Denials recorded for this child (seccomp user notification and proxy).
     pub violations: Vec<SandboxViolation>,
+    /// True when kernel syscall denials could be observed. When false, an
+    /// empty `violations` list is not a clean kernel run; parent-side proxy
+    /// denials may still appear. Filesystem denials are unavailable without
+    /// a privileged audit stream (`health` reports `fs_violations=unavailable`).
+    pub violations_observed: bool,
 }
 
 /// Which end of a captured stream to keep when it exceeds the cap.
@@ -231,6 +243,8 @@ pub struct Capabilities {
     pub seccomp: bool,
     /// A writable cgroup v2 subtree is available for per-child limits.
     pub cgroup: bool,
+    /// Seccomp user notification can record denied syscalls in the parent.
+    pub seccomp_user_notif: bool,
 }
 
 /// Failure to prepare or apply a sandbox.
@@ -307,11 +321,17 @@ pub fn capabilities() -> Capabilities {
     #[cfg(not(target_os = "linux"))]
     let cgroup = false;
 
+    #[cfg(target_os = "linux")]
+    let seccomp_user_notif = notif::probe_user_notif();
+    #[cfg(not(target_os = "linux"))]
+    let seccomp_user_notif = false;
+
     Capabilities {
         rlimit,
         landlock_abi,
         seccomp: cfg!(target_os = "linux"),
         cgroup,
+        seccomp_user_notif,
     }
 }
 
@@ -396,8 +416,13 @@ fn linux_native_health(settings: &Settings) -> Health {
                     format!("allowlist={hosts_len}", hosts_len = hosts.len())
                 }
             };
+            let violations = if notif::probe_user_notif() {
+                "user_notif"
+            } else {
+                "unavailable"
+            };
             Health::Ok(format!(
-                "sandbox:   backend=linux_native abi={abi} network={network} signal_scoping={signal} writable=output+scratch+{} inputs={} readable={} cpu={:?} memory_mb={:?} user_processes={:?}",
+                "sandbox:   backend=linux_native abi={abi} network={network} signal_scoping={signal} writable=output+scratch+{} inputs={} readable={} cpu={:?} memory_mb={:?} user_processes={:?} violations={violations} fs_violations=unavailable",
                 settings.writable_roots.len(),
                 settings.inputs.len(),
                 settings.readable_roots.len(),
@@ -425,6 +450,8 @@ pub struct Sandbox {
     cgroup: Option<Arc<cgroup::CgroupPrepared>>,
     #[cfg(target_os = "linux")]
     proxy: Option<Arc<proxy::EgressProxy>>,
+    #[cfg(target_os = "linux")]
+    notif: Mutex<Vec<Arc<notif::ViolationCollector>>>,
 }
 
 impl Sandbox {
@@ -483,6 +510,8 @@ impl Sandbox {
             cgroup,
             #[cfg(target_os = "linux")]
             proxy,
+            #[cfg(target_os = "linux")]
+            notif: Mutex::new(Vec::new()),
         })
     }
 
@@ -553,12 +582,22 @@ impl Sandbox {
             Network::Allowlist(_) => linux::SocketPolicy::UnixOnly,
             Network::Deny => linux::SocketPolicy::Deny,
         };
+        let mut notif_sock = None;
+        if notif::probe_user_notif()
+            && let Ok((collector, child_fd)) = notif::ViolationCollector::listen()
+        {
+            if let Ok(mut list) = self.notif.lock() {
+                list.push(collector);
+            }
+            notif_sock = Some(child_fd);
+        }
         linux::apply(
             command,
             rlimit_values(&self.settings),
             sockets,
             self.cgroup_procs_fd(),
             prepared,
+            notif_sock,
         )
     }
 
@@ -824,8 +863,16 @@ impl Sandbox {
                 .as_ref()
                 .map(|prepared| prepared.usage())
                 .unwrap_or_default();
+            if let Ok(collectors) = self.notif.lock() {
+                for collector in collectors.iter() {
+                    if collector.observed() {
+                        usage.violations_observed = true;
+                    }
+                    merge_violations(&mut usage.violations, collector.violations());
+                }
+            }
             if let Some(proxy) = &self.proxy {
-                usage.violations = proxy.violations();
+                merge_violations(&mut usage.violations, proxy.violations());
             }
             usage
         }
@@ -892,6 +939,20 @@ fn sigkill() -> i32 {
     #[cfg(not(unix))]
     {
         0
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn merge_violations(into: &mut Vec<SandboxViolation>, extra: Vec<SandboxViolation>) {
+    for item in extra {
+        if let Some(existing) = into
+            .iter_mut()
+            .find(|v| v.kind == item.kind && v.detail == item.detail)
+        {
+            existing.count = existing.count.saturating_add(item.count);
+        } else {
+            into.push(item);
+        }
     }
 }
 
@@ -1347,6 +1408,7 @@ mod tests {
         if !cfg!(target_os = "linux") {
             assert_eq!(caps.landlock_abi, None);
             assert!(!caps.cgroup);
+            assert!(!caps.seccomp_user_notif);
         }
     }
 
