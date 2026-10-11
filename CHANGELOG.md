@@ -43,3 +43,8 @@ sandbox enforces is listed here.
   sockets fail. Matching is by CONNECT target, not DNS. Denied CONNECT
   targets are recorded on `ChildUsage.violations`. Requires Landlock
   ABI 6.
+- Named path roles on `Settings`: `inputs` (read-only) and `output`
+  (writable directory; default is the workspace root). An input that
+  overlaps a writable role is `Error::Invalid`. Scratch stays a unique
+  per-run directory, exported as `TMPDIR`, and is removed when the
+  sandbox is dropped.

@@ -20,6 +20,7 @@
 //! ```
 
 use std::fmt;
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -188,10 +189,20 @@ pub struct Settings {
     pub backend: Backend,
     /// Resource limits applied by `rlimit` and `linux_native`.
     pub limits: Limits,
+    /// Read-only input paths under `linux_native`. Writes are denied.
+    ///
+    /// An input that is the same as, or lives under, a writable role (output,
+    /// the workspace when it is the output, extra [`Self::writable_roots`],
+    /// or scratch) is [`Error::Invalid`].
+    pub inputs: Vec<PathBuf>,
+    /// Writable output directory under `linux_native`. `None` uses the
+    /// workspace root passed to [`Sandbox::prepare`].
+    pub output: Option<PathBuf>,
     /// Extra absolute paths granted read and execute under `linux_native`.
     pub readable_roots: Vec<PathBuf>,
     /// Extra absolute paths granted read and write under `linux_native`.
-    /// The workspace root passed to [`Sandbox::prepare`] is always writable.
+    /// Scratch is always writable. The workspace root is writable when
+    /// [`Self::output`] is `None` or names that same path.
     pub writable_roots: Vec<PathBuf>,
     /// Socket creation policy under `linux_native`. Ignored by other backends.
     pub network: Network,
@@ -386,8 +397,9 @@ fn linux_native_health(settings: &Settings) -> Health {
                 }
             };
             Health::Ok(format!(
-                "sandbox:   backend=linux_native abi={abi} network={network} signal_scoping={signal} writable=workspace+scratch+{} readable={} cpu={:?} memory_mb={:?} user_processes={:?}",
+                "sandbox:   backend=linux_native abi={abi} network={network} signal_scoping={signal} writable=output+scratch+{} inputs={} readable={} cpu={:?} memory_mb={:?} user_processes={:?}",
                 settings.writable_roots.len(),
+                settings.inputs.len(),
                 settings.readable_roots.len(),
                 settings.limits.cpu_time_secs,
                 settings.limits.memory_mb,
@@ -418,10 +430,12 @@ pub struct Sandbox {
 impl Sandbox {
     /// Validate settings, probe the host, and build any kernel ruleset.
     ///
-    /// `root` is the workspace directory. Under `linux_native` it is granted
-    /// read and write; extra roots come from [`Settings`].
+    /// `root` is the workspace directory. Under `linux_native` it is the
+    /// writable output when [`Settings::output`] is `None`. Path roles come
+    /// from [`Settings`].
     pub fn prepare(settings: &Settings, root: impl AsRef<Path>) -> Result<Self, Error> {
         validate(settings)?;
+        check_path_roles(settings, root.as_ref())?;
         match health(settings) {
             Health::Error(message) => return Err(error_from_health(settings.backend, message)),
             Health::Ok(_) | Health::Warning(_) => {}
@@ -430,6 +444,8 @@ impl Sandbox {
         let linux = if matches!(settings.backend, Backend::LinuxNative) {
             Some(linux::prepare(
                 root.as_ref(),
+                &settings.inputs,
+                settings.output.as_deref(),
                 &settings.readable_roots,
                 &settings.writable_roots,
             )?)
@@ -891,16 +907,19 @@ fn validate(settings: &Settings) -> Result<(), Error> {
             return Err(Error::invalid(format!("{name} must be greater than zero")));
         }
     }
-    if (!settings.readable_roots.is_empty() || !settings.writable_roots.is_empty())
+    let named_paths = !settings.inputs.is_empty() || settings.output.is_some();
+    if (named_paths || !settings.readable_roots.is_empty() || !settings.writable_roots.is_empty())
         && !matches!(settings.backend, Backend::LinuxNative)
     {
         return Err(Error::invalid(
-            "readable_roots and writable_roots are only applied by backend linux_native",
+            "path roles, readable_roots, and writable_roots are only applied by backend linux_native",
         ));
     }
     for path in settings
-        .readable_roots
+        .inputs
         .iter()
+        .chain(settings.output.iter())
+        .chain(settings.readable_roots.iter())
         .chain(settings.writable_roots.iter())
     {
         if !path.is_absolute() {
@@ -910,6 +929,20 @@ fn validate(settings: &Settings) -> Result<(), Error> {
             )));
         }
     }
+    let inputs: Vec<PathBuf> = settings.inputs.iter().map(|p| normalize_path(p)).collect();
+    let writable_roots: Vec<PathBuf> = settings
+        .writable_roots
+        .iter()
+        .map(|p| normalize_path(p))
+        .collect();
+    let output_buf;
+    let named: Vec<(&str, &Path)> = if let Some(path) = &settings.output {
+        output_buf = normalize_path(path);
+        vec![("output", output_buf.as_path())]
+    } else {
+        Vec::new()
+    };
+    reject_inputs_under_writables(&inputs, &named, &writable_roots)?;
     if !settings.cgroup.is_empty() && matches!(settings.backend, Backend::None) {
         return Err(Error::invalid(
             "cgroup limits require backend rlimit or linux_native",
@@ -961,6 +994,64 @@ fn validate(settings: &Settings) -> Result<(), Error> {
             "cgroup_root `{}` must be an absolute path",
             root.display()
         )));
+    }
+    Ok(())
+}
+
+fn check_path_roles(settings: &Settings, workspace: &Path) -> Result<(), Error> {
+    let inputs: Vec<PathBuf> = settings.inputs.iter().map(|p| normalize_path(p)).collect();
+    let writable_roots: Vec<PathBuf> = settings
+        .writable_roots
+        .iter()
+        .map(|p| normalize_path(p))
+        .collect();
+    let output = match &settings.output {
+        Some(path) => normalize_path(path),
+        None => normalize_path(workspace),
+    };
+    reject_inputs_under_writables(&inputs, &[("output", output.as_path())], &writable_roots)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
+}
+
+fn path_is_same_or_under(path: &Path, ancestor: &Path) -> bool {
+    path == ancestor || path.starts_with(ancestor)
+}
+
+pub(crate) fn reject_inputs_under_writables(
+    inputs: &[PathBuf],
+    named: &[(&str, &Path)],
+    writable_roots: &[PathBuf],
+) -> Result<(), Error> {
+    for input in inputs {
+        for (label, writable) in named {
+            if path_is_same_or_under(input, writable) {
+                return Err(Error::invalid(format!(
+                    "input `{}` overlaps writable {label} `{}`",
+                    input.display(),
+                    writable.display()
+                )));
+            }
+        }
+        for writable in writable_roots {
+            if path_is_same_or_under(input, writable) {
+                return Err(Error::invalid(format!(
+                    "input `{}` overlaps writable writable_roots `{}`",
+                    input.display(),
+                    writable.display()
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -1126,6 +1217,68 @@ mod tests {
         let error = Sandbox::prepare(&settings, ".").unwrap_err();
         assert!(
             matches!(error, Error::Invalid { ref message } if message.contains("absolute")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn inputs_require_linux_native() {
+        let mut settings = Settings::default();
+        settings.inputs.push("/tmp".into());
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("linux_native"), "{error}");
+    }
+
+    #[test]
+    fn input_overlapping_output_is_invalid() {
+        let settings = Settings {
+            backend: Backend::LinuxNative,
+            inputs: vec!["/tmp".into()],
+            output: Some("/tmp".into()),
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, "/tmp").unwrap_err();
+        assert!(
+            matches!(error, Error::Invalid { ref message } if message.contains("overlap")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn input_inside_workspace_is_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("ws");
+        let input = workspace.join("in");
+        fs::create_dir_all(&input).unwrap();
+        let settings = Settings {
+            backend: Backend::LinuxNative,
+            inputs: vec![input],
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, &workspace).unwrap_err();
+        assert!(
+            matches!(error, Error::Invalid { ref message } if message.contains("overlap")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn input_inside_writable_root_is_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("ws");
+        let writable = tmp.path().join("rw");
+        let input = writable.join("in");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&input).unwrap();
+        let settings = Settings {
+            backend: Backend::LinuxNative,
+            inputs: vec![input],
+            writable_roots: vec![writable],
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, &workspace).unwrap_err();
+        assert!(
+            matches!(error, Error::Invalid { ref message } if message.contains("overlap")),
             "{error}"
         );
     }

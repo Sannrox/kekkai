@@ -177,6 +177,8 @@ pub(super) fn probe_enforcement() -> Result<u32, Error> {
 
 pub(super) fn prepare(
     workspace: &Path,
+    inputs: &[PathBuf],
+    output: Option<&Path>,
     readable_roots: &[PathBuf],
     writable_roots: &[PathBuf],
 ) -> Result<Arc<LinuxPrepared>, Error> {
@@ -187,7 +189,28 @@ pub(super) fn prepare(
             workspace.display()
         ))
     })?;
+    let inputs = canonicalize_all(inputs, "inputs")?;
+    let readable_roots = canonicalize_all(readable_roots, "readable_roots")?;
+    let writable_roots = canonicalize_all(writable_roots, "writable_roots")?;
+    let output = match output {
+        Some(path) => fs::canonicalize(path)
+            .map_err(|error| Error::invalid(format!("output `{}`: {error}", path.display())))?,
+        None => workspace.clone(),
+    };
+    crate::reject_inputs_under_writables(
+        &inputs,
+        &[("output", output.as_path())],
+        &writable_roots,
+    )?;
     let scratch = create_scratch()?;
+    if let Err(error) = crate::reject_inputs_under_writables(
+        &inputs,
+        &[("output", output.as_path()), ("scratch", scratch.as_path())],
+        &writable_roots,
+    ) {
+        let _ = fs::remove_dir_all(&scratch);
+        return Err(error);
+    }
     let ruleset = match create_ruleset(abi) {
         Ok(fd) => fd,
         Err(error) => {
@@ -199,12 +222,23 @@ pub(super) fn prepare(
     add_path_rules(
         &prepared.ruleset,
         abi,
-        &workspace,
         &prepared.scratch,
-        readable_roots,
-        writable_roots,
+        &output,
+        &inputs,
+        &readable_roots,
+        &writable_roots,
     )?;
     Ok(Arc::new(prepared))
+}
+
+fn canonicalize_all(paths: &[PathBuf], label: &str) -> Result<Vec<PathBuf>, Error> {
+    paths
+        .iter()
+        .map(|path| {
+            fs::canonicalize(path)
+                .map_err(|error| Error::invalid(format!("{label} `{}`: {error}", path.display())))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -314,15 +348,16 @@ fn create_ruleset(abi: u32) -> Result<OwnedFd, Error> {
 fn add_path_rules(
     ruleset: &OwnedFd,
     abi: u32,
-    workspace: &Path,
     scratch: &Path,
+    output: &Path,
+    inputs: &[PathBuf],
     extra_read_only: &[PathBuf],
     extra_writable: &[PathBuf],
 ) -> Result<(), Error> {
     let read_dir = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
     let read_file = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE;
     let write_dev = ACCESS_FS_READ_FILE | ACCESS_FS_WRITE_FILE | truncate_bit(abi);
-    // Workspace/scratch stay ordinary files and directories: device nodes
+    // Output/scratch stay ordinary files and directories: device nodes
     // would let a capable child reopen a host disk through an allowed path.
     let write_dir = handled_fs(abi) & !ACCESS_FS_MAKE_CHAR & !ACCESS_FS_MAKE_BLOCK;
 
@@ -332,28 +367,18 @@ fn add_path_rules(
     for path in SYSTEM_READ_FILES {
         add_existing(ruleset, Path::new(path), read_file, abi)?;
     }
-    for path in extra_read_only {
-        let canonical = fs::canonicalize(path).map_err(|error| {
-            Error::invalid(format!("readable_roots `{}`: {error}", path.display()))
-        })?;
-        let access = if canonical.is_dir() {
-            read_dir
-        } else {
-            read_file
-        };
-        add_path(ruleset, &canonical, access, abi)?;
+    for path in inputs.iter().chain(extra_read_only) {
+        let access = if path.is_dir() { read_dir } else { read_file };
+        add_path(ruleset, path, access, abi)?;
     }
     for path in WRITABLE_DEVS {
         add_existing(ruleset, Path::new(path), write_dev | ioctl_bit(abi), abi)?;
     }
-    add_path(ruleset, workspace, write_dir, abi)?;
+    add_path(ruleset, output, write_dir, abi)?;
     add_path(ruleset, scratch, write_dir, abi)?;
     for path in extra_writable {
-        let canonical = fs::canonicalize(path).map_err(|error| {
-            Error::invalid(format!("writable_roots `{}`: {error}", path.display()))
-        })?;
-        if canonical != workspace && canonical != scratch {
-            add_path(ruleset, &canonical, write_dir, abi)?;
+        if path != output && path != scratch {
+            add_path(ruleset, path, write_dir, abi)?;
         }
     }
     Ok(())
