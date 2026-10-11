@@ -14,6 +14,13 @@ homepage = "https://github.com/Sannrox/kekkai"
 documentation = "https://docs.rs/kekkai"
 
 [[bin]]
+name = "kekkai"
+path = "src/bin/kekkai.rs"
+doc = false
+test = false
+bench = false
+
+[[bin]]
 name = "kekkai-probe"
 path = "src/bin/kekkai-probe.rs"
 doc = false

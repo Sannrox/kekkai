@@ -9,6 +9,14 @@ sandbox enforces is listed here.
 
 ### Added
 
+- `kekkai run` CLI: flags or a JSON settings file in, `Sandbox::prepare` /
+  `spawn` of a real command out. The child inherits stdio. After it
+  exits, a JSON `RunReport` (`schema_version` 1) is written to stderr
+  (or `--report PATH`, `--json` for stdout). The process exit code is
+  the child's (or `128+N` on signal). Usage and prepare/apply/spawn
+  failures exit 2. Default backend is `linux_native` on Linux, `macos`
+  on macOS, `rlimit` elsewhere; `--backend` and a settings `backend`
+  key override. There is no silent downgrade.
 - `macos` backend: Seatbelt filesystem allowlist and network deny/allow,
   applied in `pre_exec` via `sandbox_init`. Path roles match
   `linux_native` (`inputs`, `output`, extra roots, scratch `TMPDIR`).

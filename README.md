@@ -77,6 +77,22 @@ let status = cmd.status()?;
 # }
 ```
 
+## CLI
+
+`kekkai run` prepares the same sandbox as the library and spawns a command:
+
+```bash
+kekkai run --settings job.json --workspace ./ws -- python3 job.py
+kekkai run --backend none --report out.json -- /usr/bin/true
+```
+
+The child inherits stdin, stdout, and stderr. After it exits, a JSON
+`RunReport` (`schema_version` 1) is written to stderr, or to `--report PATH`
+(`-` or `--json` for stdout). The process exit code is the child's
+(or `128+N` when signaled). Usage errors and prepare/apply/spawn failures
+exit 2. Default backend is `linux_native` on Linux, `macos` on macOS, and
+`rlimit` elsewhere. `kekkai --help` documents flags and the JSON file.
+
 `tokio::process::Command` is supported behind the `tokio` cargo feature
 (`Sandbox::apply_tokio`, `Sandbox::spawn_with_deadline_tokio`,
 `Sandbox::spawn_with_deadline_captured_tokio`).
