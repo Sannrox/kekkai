@@ -1,6 +1,6 @@
 #![no_main]
 
-use kekkai::{Backend, CgroupLimits, Limits, Network, Sandbox, Settings};
+use kekkai::{Backend, CgroupLimits, Limits, Network, Sandbox, Settings, SyscallProfile};
 use libfuzzer_sys::fuzz_target;
 use std::path::PathBuf;
 
@@ -16,6 +16,11 @@ fuzz_target!(|data: &[u8]| {
         Network::Deny
     } else {
         Network::Allow
+    };
+    settings.syscall_profile = match b0 % 3 {
+        0 => SyscallProfile::Default,
+        1 => SyscallProfile::Strict,
+        _ => SyscallProfile::Python,
     };
     if data.len() > 8 {
         let n = u64::from(data[1]);

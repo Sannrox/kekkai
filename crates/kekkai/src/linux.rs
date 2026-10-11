@@ -1,5 +1,6 @@
 //! In-process `linux_native` isolation: Landlock filesystem rules plus a
-//! seccomp socket gate, applied in the child's `pre_exec` hook.
+//! seccomp socket gate and syscall profile, applied in the child's
+//! `pre_exec` hook.
 
 use std::fs;
 use std::io;
@@ -10,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use crate::{Error, Limits};
+use crate::{Error, Limits, SyscallProfile};
 
 /// Lowest Landlock ABI that mediates `truncate(2)` (kernel 6.2). Signal
 /// scoping (`LANDLOCK_SCOPE_SIGNAL`) needs ABI 6 (kernel 6.12); below that
@@ -146,7 +147,11 @@ pub(super) fn probe_enforcement() -> Result<u32, Error> {
             if libc::syscall(SYS_landlock_restrict_self, ruleset_fd, 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            let (filter, filter_len) = socket_filter(SocketPolicy::Deny, SECCOMP_RET_ERRNO_EPERM);
+            let (filter, filter_len) = socket_filter(
+                SocketPolicy::Deny,
+                SECCOMP_RET_ERRNO_EPERM,
+                SyscallProfile::Default,
+            );
             let mut prog = libc::sock_fprog {
                 len: filter_len,
                 filter: filter.as_ptr().cast_mut(),
@@ -259,6 +264,7 @@ pub(super) fn apply(
     isolate: bool,
     view: Option<Arc<crate::view::ViewPlan>>,
     loopback: bool,
+    profile: SyscallProfile,
 ) -> Result<(), Error> {
     let tmpdir = if view.is_some() {
         prepared.scratch.join("tmp")
@@ -296,7 +302,7 @@ pub(super) fn apply(
             if libc::syscall(SYS_landlock_restrict_self, prepared.ruleset.as_raw_fd(), 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            install_seccomp(sockets, notif_sock)
+            install_seccomp(sockets, notif_sock, profile)
         });
     }
     Ok(())
@@ -428,9 +434,13 @@ fn close_extra_fds() -> io::Result<()> {
     Ok(())
 }
 
-fn install_seccomp(sockets: SocketPolicy, notif_sock: Option<RawFd>) -> io::Result<()> {
+fn install_seccomp(
+    sockets: SocketPolicy,
+    notif_sock: Option<RawFd>,
+    profile: SyscallProfile,
+) -> io::Result<()> {
     if let Some(sock) = notif_sock {
-        if install_seccomp_listener(sockets, sock).is_ok() {
+        if install_seccomp_listener(sockets, sock, profile).is_ok() {
             return Ok(());
         }
         let _ = send_notif_handshake(sock, 0, None);
@@ -439,11 +449,15 @@ fn install_seccomp(sockets: SocketPolicy, notif_sock: Option<RawFd>) -> io::Resu
             libc::close(sock);
         }
     }
-    install_seccomp_errno(sockets)
+    install_seccomp_errno(sockets, profile)
 }
 
-fn install_seccomp_listener(sockets: SocketPolicy, sock: RawFd) -> io::Result<()> {
-    let (filter, filter_len) = socket_filter(sockets, SECCOMP_RET_USER_NOTIF);
+fn install_seccomp_listener(
+    sockets: SocketPolicy,
+    sock: RawFd,
+    profile: SyscallProfile,
+) -> io::Result<()> {
+    let (filter, filter_len) = socket_filter(sockets, SECCOMP_RET_USER_NOTIF, profile);
     let mut prog = libc::sock_fprog {
         len: filter_len,
         filter: filter.as_ptr().cast_mut(),
@@ -477,8 +491,8 @@ fn install_seccomp_listener(sockets: SocketPolicy, sock: RawFd) -> io::Result<()
     sent
 }
 
-fn install_seccomp_errno(sockets: SocketPolicy) -> io::Result<()> {
-    let (filter, filter_len) = socket_filter(sockets, SECCOMP_RET_ERRNO_EPERM);
+fn install_seccomp_errno(sockets: SocketPolicy, profile: SyscallProfile) -> io::Result<()> {
+    let (filter, filter_len) = socket_filter(sockets, SECCOMP_RET_ERRNO_EPERM, profile);
     let mut prog = libc::sock_fprog {
         len: filter_len,
         filter: filter.as_ptr().cast_mut(),
@@ -763,108 +777,114 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
     libc::sock_filter { code, jt, jf, k }
 }
 
-fn socket_filter(sockets: SocketPolicy, deny: u32) -> ([libc::sock_filter; 64], u16) {
-    let mut filter = [stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW); 64];
-    let mut i = 0;
-    let push = |filter: &mut [libc::sock_filter; 64], i: &mut usize, insn: libc::sock_filter| {
-        filter[*i] = insn;
-        *i += 1;
+/// Classic BPF cap. An allowlist of ~250 syscalls is two insns each plus
+/// the socket gate; the kernel limit is 4096. Built on the stack so
+/// `pre_exec` never allocates.
+const FILTER_CAP: usize = 1024;
+
+fn socket_filter(
+    sockets: SocketPolicy,
+    deny: u32,
+    profile: SyscallProfile,
+) -> ([libc::sock_filter; FILTER_CAP], u16) {
+    let mut filter = [stmt(BPF_RET | BPF_K, deny); FILTER_CAP];
+    let mut i = 0usize;
+    let mut overflow = false;
+    let mut push = |insn: libc::sock_filter| {
+        if i >= FILTER_CAP {
+            overflow = true;
+            return;
+        }
+        filter[i] = insn;
+        i += 1;
     };
 
     // seccomp_data.arch at offset 4; nr at offset 0; args[0] at 16.
-    push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 4));
-    push(
-        &mut filter,
-        &mut i,
-        jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH, 1, 0),
-    );
-    push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
-    push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 0));
+    push(stmt(BPF_LD | BPF_W | BPF_ABS, 4));
+    push(jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH, 1, 0));
+    push(stmt(BPF_RET | BPF_K, deny));
+    push(stmt(BPF_LD | BPF_W | BPF_ABS, 0));
     // x32 shares AUDIT_ARCH_X86_64; the syscall number has bit 0x40000000 set.
-    push(
-        &mut filter,
-        &mut i,
-        jump(BPF_JMP | BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1),
-    );
-    push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
+    push(jump(BPF_JMP | BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1));
+    push(stmt(BPF_RET | BPF_K, deny));
     if matches!(sockets, SocketPolicy::Deny | SocketPolicy::UnixOnly) {
         if matches!(sockets, SocketPolicy::UnixOnly) {
             // socket(): only AF_UNIX. Direct IP (including raw-IP / DNS bypass)
             // cannot be created.
-            push(
-                &mut filter,
-                &mut i,
-                jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_socket as u32, 0, 4),
-            );
-            push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 16));
-            push(
-                &mut filter,
-                &mut i,
-                jump(BPF_JMP | BPF_JEQ | BPF_K, libc::AF_UNIX as u32, 1, 0),
-            );
-            push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
-            push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 0));
+            push(jump(
+                BPF_JMP | BPF_JEQ | BPF_K,
+                libc::SYS_socket as u32,
+                0,
+                4,
+            ));
+            push(stmt(BPF_LD | BPF_W | BPF_ABS, 16));
+            push(jump(BPF_JMP | BPF_JEQ | BPF_K, libc::AF_UNIX as u32, 1, 0));
+            push(stmt(BPF_RET | BPF_K, deny));
+            push(stmt(BPF_LD | BPF_W | BPF_ABS, 0));
         } else {
-            push(
-                &mut filter,
-                &mut i,
-                jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_socket as u32, 0, 1),
-            );
-            push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
+            push(jump(
+                BPF_JMP | BPF_JEQ | BPF_K,
+                libc::SYS_socket as u32,
+                0,
+                1,
+            ));
+            push(stmt(BPF_RET | BPF_K, deny));
         }
         // socketpair: only AF_UNIX SOCK_STREAM (pipes, git). Datagram pairs can
         // sendto() a host pathname socket such as /dev/log.
-        push(
-            &mut filter,
-            &mut i,
-            jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_socketpair as u32, 0, 7),
-        );
-        push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 16));
-        push(
-            &mut filter,
-            &mut i,
-            jump(BPF_JMP | BPF_JEQ | BPF_K, libc::AF_UNIX as u32, 1, 0),
-        );
-        push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
-        push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 24));
-        push(&mut filter, &mut i, stmt(BPF_ALU | BPF_AND | BPF_K, 0xf));
-        push(
-            &mut filter,
-            &mut i,
-            jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SOCK_STREAM as u32, 1, 0),
-        );
-        push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
-        push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 0));
+        push(jump(
+            BPF_JMP | BPF_JEQ | BPF_K,
+            libc::SYS_socketpair as u32,
+            0,
+            7,
+        ));
+        push(stmt(BPF_LD | BPF_W | BPF_ABS, 16));
+        push(jump(BPF_JMP | BPF_JEQ | BPF_K, libc::AF_UNIX as u32, 1, 0));
+        push(stmt(BPF_RET | BPF_K, deny));
+        push(stmt(BPF_LD | BPF_W | BPF_ABS, 24));
+        push(stmt(BPF_ALU | BPF_AND | BPF_K, 0xf));
+        push(jump(
+            BPF_JMP | BPF_JEQ | BPF_K,
+            libc::SOCK_STREAM as u32,
+            1,
+            0,
+        ));
+        push(stmt(BPF_RET | BPF_K, deny));
+        push(stmt(BPF_LD | BPF_W | BPF_ABS, 0));
     }
-    // Close alternate socket, signal, identity-change, and debug routes.
-    // `setpgid` already ran in this hook; the child must not join the parent
-    // group, stand up io_uring (IORING_OP_SOCKET), or ptrace the parent.
-    for nr in [
-        libc::SYS_pidfd_send_signal as u32,
-        libc::SYS_rt_sigqueueinfo as u32,
-        libc::SYS_rt_tgsigqueueinfo as u32,
-        libc::SYS_io_uring_setup as u32,
-        libc::SYS_io_uring_enter as u32,
-        libc::SYS_io_uring_register as u32,
-        libc::SYS_ptrace as u32,
-        libc::SYS_setpgid as u32,
-        libc::SYS_setsid as u32,
-        libc::SYS_setns as u32,
-        libc::SYS_unshare as u32,
-    ] {
-        push(
-            &mut filter,
-            &mut i,
-            jump(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1),
-        );
-        push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
+    if matches!(profile, SyscallProfile::Default) {
+        // Historical denylist: ptrace, io_uring, identity-change, namespace
+        // escape. Everything else is allowed.
+        for nr in [
+            libc::SYS_pidfd_send_signal as u32,
+            libc::SYS_rt_sigqueueinfo as u32,
+            libc::SYS_rt_tgsigqueueinfo as u32,
+            libc::SYS_io_uring_setup as u32,
+            libc::SYS_io_uring_enter as u32,
+            libc::SYS_io_uring_register as u32,
+            libc::SYS_ptrace as u32,
+            libc::SYS_setpgid as u32,
+            libc::SYS_setsid as u32,
+            libc::SYS_setns as u32,
+            libc::SYS_unshare as u32,
+        ] {
+            push(jump(BPF_JMP | BPF_JEQ | BPF_K, nr, 0, 1));
+            push(stmt(BPF_RET | BPF_K, deny));
+        }
+        push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+    } else {
+        let mut nrs = [0u32; 256];
+        let n = crate::syscalls::allowlist(profile, &mut nrs);
+        for nr in nrs.iter().take(n) {
+            push(jump(BPF_JMP | BPF_JEQ | BPF_K, *nr, 0, 1));
+            push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+        }
+        push(stmt(BPF_RET | BPF_K, deny));
     }
-
-    push(
-        &mut filter,
-        &mut i,
-        stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-    );
+    if overflow || i == 0 {
+        filter[0] = stmt(BPF_RET | BPF_K, deny);
+        return (filter, 1);
+    }
     (filter, i as u16)
 }
 
@@ -890,21 +910,69 @@ mod tests {
 
     #[test]
     fn socket_filter_fits_the_fixed_program() {
-        let (_filter, len) = socket_filter(SocketPolicy::Deny, SECCOMP_RET_ERRNO_EPERM);
+        let (_filter, len) = socket_filter(
+            SocketPolicy::Deny,
+            SECCOMP_RET_ERRNO_EPERM,
+            SyscallProfile::Default,
+        );
         assert!(len > 8 && len <= 64, "deny sockets len={len}");
-        let (_filter, len) = socket_filter(SocketPolicy::Allow, SECCOMP_RET_ERRNO_EPERM);
+        let (_filter, len) = socket_filter(
+            SocketPolicy::Allow,
+            SECCOMP_RET_ERRNO_EPERM,
+            SyscallProfile::Default,
+        );
         assert!(len > 4 && len <= 64, "allow sockets len={len}");
-        let (_filter, len) = socket_filter(SocketPolicy::UnixOnly, SECCOMP_RET_USER_NOTIF);
+        let (_filter, len) = socket_filter(
+            SocketPolicy::UnixOnly,
+            SECCOMP_RET_USER_NOTIF,
+            SyscallProfile::Default,
+        );
         assert!(len > 8 && len <= 64, "unix-only sockets len={len}");
         assert!(
-            socket_filter(SocketPolicy::Deny, SECCOMP_RET_ERRNO_EPERM).1
-                > socket_filter(SocketPolicy::Allow, SECCOMP_RET_ERRNO_EPERM).1,
+            socket_filter(
+                SocketPolicy::Deny,
+                SECCOMP_RET_ERRNO_EPERM,
+                SyscallProfile::Default
+            )
+            .1 > socket_filter(
+                SocketPolicy::Allow,
+                SECCOMP_RET_ERRNO_EPERM,
+                SyscallProfile::Default
+            )
+            .1,
             "denying sockets must add instructions"
         );
         assert!(
-            socket_filter(SocketPolicy::UnixOnly, SECCOMP_RET_ERRNO_EPERM).1
-                > socket_filter(SocketPolicy::Deny, SECCOMP_RET_ERRNO_EPERM).1,
+            socket_filter(
+                SocketPolicy::UnixOnly,
+                SECCOMP_RET_ERRNO_EPERM,
+                SyscallProfile::Default
+            )
+            .1 > socket_filter(
+                SocketPolicy::Deny,
+                SECCOMP_RET_ERRNO_EPERM,
+                SyscallProfile::Default
+            )
+            .1,
             "unix-only must add the AF_UNIX check"
         );
+    }
+
+    #[test]
+    fn allowlist_filters_fit_capacity() {
+        for profile in [SyscallProfile::Strict, SyscallProfile::Python] {
+            let (_filter, len) =
+                socket_filter(SocketPolicy::Deny, SECCOMP_RET_ERRNO_EPERM, profile);
+            assert!(
+                len > 16 && (len as usize) < FILTER_CAP,
+                "{profile:?} len={len}"
+            );
+            let (_filter, allow_len) =
+                socket_filter(SocketPolicy::Allow, SECCOMP_RET_ERRNO_EPERM, profile);
+            assert!(
+                allow_len < len,
+                "{profile:?} network deny should add insns: allow={allow_len} deny={len}"
+            );
+        }
     }
 }

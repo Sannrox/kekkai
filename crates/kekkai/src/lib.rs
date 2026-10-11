@@ -47,6 +47,8 @@ mod ns;
 #[cfg(target_os = "linux")]
 mod proxy;
 #[cfg(target_os = "linux")]
+mod syscalls;
+#[cfg(target_os = "linux")]
 mod view;
 
 pub use capture::StreamCapture;
@@ -304,6 +306,12 @@ pub struct Settings {
     pub namespaces: Namespaces,
     /// Isolated filesystem view. Requires [`Namespaces::Isolate`].
     pub filesystem_view: FilesystemView,
+    /// Seccomp syscall profile under `linux_native`.
+    ///
+    /// [`SyscallProfile::Default`] is the historical denylist. `Strict` and
+    /// `Python` are per-architecture allowlists and require
+    /// [`Backend::LinuxNative`].
+    pub syscall_profile: SyscallProfile,
 }
 
 impl Settings {
@@ -386,6 +394,12 @@ impl SettingsBuilder {
         self
     }
 
+    /// Seccomp syscall profile.
+    pub fn syscall_profile(mut self, syscall_profile: SyscallProfile) -> Self {
+        self.inner.syscall_profile = syscall_profile;
+        self
+    }
+
     /// Finish the builder.
     pub fn build(self) -> Settings {
         self.inner
@@ -424,6 +438,21 @@ pub struct Capabilities {
     pub filesystem_view: bool,
     /// A private network namespace with loopback can be created.
     pub network_namespace: bool,
+}
+
+/// Seccomp syscall profile under `linux_native`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SyscallProfile {
+    /// Historical denylist: `ptrace`, `io_uring`, identity-change, and
+    /// namespace-escape syscalls fail; everything else is allowed. This is
+    /// the default.
+    #[default]
+    Default,
+    /// Small allowlist for a simple child (`true`, file copy).
+    Strict,
+    /// Allowlist sized for CPython and in-process analytics.
+    Python,
 }
 
 /// Failure to prepare or apply a sandbox.
@@ -728,6 +757,15 @@ fn cgroup_health(settings: &Settings) -> Option<Health> {
 }
 
 #[cfg(target_os = "linux")]
+fn syscall_profile_label(profile: SyscallProfile) -> &'static str {
+    match profile {
+        SyscallProfile::Default => "default",
+        SyscallProfile::Strict => "strict",
+        SyscallProfile::Python => "python",
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn linux_native_health(settings: &Settings) -> Health {
     match linux::probe_enforcement() {
         Ok(abi) => {
@@ -752,7 +790,8 @@ fn linux_native_health(settings: &Settings) -> Health {
                 "unavailable"
             };
             Health::Ok(format!(
-                "sandbox:   backend=linux_native abi={abi} network={network} signal_scoping={signal} writable=output+scratch+{} inputs={} readable={} cpu={:?} memory_mb={:?} user_processes={:?} violations={violations} fs_violations=unavailable",
+                "sandbox:   backend=linux_native abi={abi} network={network} syscalls={} signal_scoping={signal} writable=output+scratch+{} inputs={} readable={} cpu={:?} memory_mb={:?} user_processes={:?} violations={violations} fs_violations=unavailable",
+                syscall_profile_label(settings.syscall_profile),
                 settings.writable_roots.len(),
                 settings.inputs.len(),
                 settings.readable_roots.len(),
@@ -983,6 +1022,7 @@ impl Sandbox {
             matches!(self.settings.namespaces, Namespaces::Isolate),
             self.view.clone(),
             matches!(self.settings.network, Network::Loopback),
+            self.settings.syscall_profile,
         )
     }
 
@@ -1456,6 +1496,13 @@ fn validate(settings: &Settings) -> Result<(), Error> {
         }
         Network::Deny | Network::Allow => {}
     }
+    if !matches!(settings.syscall_profile, SyscallProfile::Default)
+        && !matches!(settings.backend, Backend::LinuxNative)
+    {
+        return Err(Error::invalid(
+            "syscall profile strict and python require backend linux_native",
+        ));
+    }
     for (name, value) in [
         ("cgroup.memory_max", settings.cgroup.memory_max),
         ("cgroup.memory_high", settings.cgroup.memory_high),
@@ -1847,6 +1894,17 @@ mod tests {
             assert!(!caps.filesystem_view);
             assert!(!caps.network_namespace);
         }
+    }
+
+    #[test]
+    fn syscall_profile_without_linux_native_is_invalid() {
+        let settings = Settings {
+            backend: Backend::Rlimit,
+            syscall_profile: SyscallProfile::Python,
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("linux_native"), "{error}");
     }
 
     #[test]

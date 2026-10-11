@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use kekkai::{Backend, CgroupLimits, Health, Network, Sandbox, Settings};
+use kekkai::{Backend, CgroupLimits, Health, Network, Sandbox, Settings, SyscallProfile};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::builder()
         .backend(Backend::LinuxNative)
         .network(Network::Deny)
+        .syscall_profile(SyscallProfile::Python)
         .inputs(vec![input.clone()])
         .output(Some(output.clone()))
         .cgroup(CgroupLimits {

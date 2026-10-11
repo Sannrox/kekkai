@@ -76,6 +76,15 @@ sandbox enforces is listed here.
   runs in a private network namespace with only loopback up. External
   routes and host abstract unix sockets are unreachable. Missing netns
   support is `Error::Unavailable`.
+- Named seccomp syscall profiles on `Settings.syscall_profile`
+  (`SyscallProfile::Default`, `Strict`, `Python`). Default keeps the
+  historical denylist. Strict and Python are per-architecture allowlists
+  (x86_64 and aarch64). A syscall outside the selected allowlist is
+  denied (`EPERM`) and recorded on `ChildUsage.violations` when user
+  notification is available. `Network` still gates `socket()` even when
+  the profile names it. Strict and Python require `linux_native`.
+  `health` reports `syscalls=default|strict|python`. CI runs the test
+  suite on aarch64 as well as x86_64.
 
 ### Changed
 
