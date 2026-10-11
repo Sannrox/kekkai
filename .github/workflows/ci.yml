@@ -22,10 +22,42 @@ jobs:
           toolchain: 1.97.1
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
+      - name: Install Python duckdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv
+          python3 -m venv "$HOME/kekkai-py"
+          "$HOME/kekkai-py/bin/pip" install duckdb
+          echo "$HOME/kekkai-py/bin" >> "$GITHUB_PATH"
       - name: Build
         run: cargo build --locked --workspace --all-targets
       - name: Examples
         run: cargo build --locked --workspace --examples
+      - name: Test
+        run: |
+          cargo test --locked --workspace
+          cargo test --locked --workspace --features tokio
+
+  build-and-test-arm:
+    name: Build & Test (aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Install Python duckdb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv
+          python3 -m venv "$HOME/kekkai-py"
+          "$HOME/kekkai-py/bin/pip" install duckdb
+          echo "$HOME/kekkai-py/bin" >> "$GITHUB_PATH"
+      - name: Build
+        run: cargo build --locked --workspace --all-targets
       - name: Test
         run: |
           cargo test --locked --workspace

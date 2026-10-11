@@ -287,23 +287,9 @@ fn record_syscall(denials: &Mutex<Vec<SandboxViolation>>, nr: i32) {
 }
 
 fn syscall_name(nr: i32) -> String {
-    let name = match nr as i64 {
-        x if x == libc::SYS_socket => "socket",
-        x if x == libc::SYS_socketpair => "socketpair",
-        x if x == libc::SYS_pidfd_send_signal => "pidfd_send_signal",
-        x if x == libc::SYS_rt_sigqueueinfo => "rt_sigqueueinfo",
-        x if x == libc::SYS_rt_tgsigqueueinfo => "rt_tgsigqueueinfo",
-        x if x == libc::SYS_io_uring_setup => "io_uring_setup",
-        x if x == libc::SYS_io_uring_enter => "io_uring_enter",
-        x if x == libc::SYS_io_uring_register => "io_uring_register",
-        x if x == libc::SYS_ptrace => "ptrace",
-        x if x == libc::SYS_setpgid => "setpgid",
-        x if x == libc::SYS_setsid => "setsid",
-        x if x == libc::SYS_setns => "setns",
-        x if x == libc::SYS_unshare => "unshare",
-        _ => return format!("syscall:{nr}"),
-    };
-    name.to_string()
+    crate::syscalls::name_of(nr)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("syscall:{nr}"))
 }
 
 pub(super) const SECCOMP_SET_MODE_FILTER_NR: libc::c_ulong = SECCOMP_SET_MODE_FILTER;

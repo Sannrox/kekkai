@@ -74,6 +74,14 @@ Under `linux_native`:
   not an inherited fd.
 - `ptrace` is denied, as are `io_uring_setup` / `io_uring_enter` /
   `io_uring_register`.
+- `Settings.syscall_profile` selects the seccomp program under
+  `linux_native`. `Default` is the historical denylist (those syscalls
+  plus identity-change and namespace-escape). `Strict` is a small
+  allowlist for a simple child. `Python` is sized for CPython and
+  in-process analytics. Strict and Python require `linux_native`. A
+  syscall outside the allowlist fails with `EPERM`. `Network` still
+  gates `socket()` even when the profile names it. `health` reports
+  `syscalls=default|strict|python`.
 - Denied syscalls are recorded on `ChildUsage.violations` when seccomp
   user notification is available (`health` contains
   `violations=user_notif`, `capabilities.seccomp_user_notif`).
@@ -123,7 +131,6 @@ cannot reach host interfaces or host abstract unix sockets.
 - Real isolation on non-Linux hosts. `linux_native` is unsupported there;
   `rlimit` still applies Unix resource limits.
 - A guest adapter. ADR 0003 is the interface only.
-- Syscall allowlists beyond the socket gate. Those are later work.
 
 ## Recommended settings
 
@@ -132,8 +139,9 @@ Construct `Settings` with `Settings::builder`. Public enums and
 breaking change on that path.
 
 **Data transform** (Python/DuckDB): `linux_native`, `Network::Deny`,
-`inputs` = input directory, `output` or workspace = output directory,
-`cgroup.memory_max` around 512 MiB. See [`examples/transform.rs`](../examples/transform.rs).
+`SyscallProfile::Python`, `inputs` = input directory, `output` or
+workspace = output directory, `cgroup.memory_max` around 512 MiB. See
+[`examples/transform.rs`](../examples/transform.rs).
 
 **Agent shell command**: `linux_native`, workspace = the run directory,
 `spawn_with_deadline_captured` with a short wall-clock limit and per-stream
@@ -152,6 +160,7 @@ this job here", not as a cue to switch backends.
 | `Error::Invalid` | Zero limits, relative roots, overlapping path roles, cgroup on `none`, `cpu_period_us` without quota. |
 | Child `EACCES` / Landlock denial | Path not on the allowlist. |
 | Child `EPERM` on `socket()` | `Network::Deny`, or IP sockets under `Allowlist`. |
+| Child `EPERM` on another syscall | `SyscallProfile::Strict` or `Python` does not allow that syscall. |
 | `ChildUsage.violations` with `ViolationKind::Network` | CONNECT to a host/port not on the allowlist. |
 | `ChildUsage.violations` with `ViolationKind::Syscall` | Seccomp denied the named syscall (`socket`, …). |
 | `violations_observed` is false | Kernel denials could not be recorded; do not treat an empty list as a clean run. |

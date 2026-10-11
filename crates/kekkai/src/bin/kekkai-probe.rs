@@ -38,7 +38,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(action) = args.next() else {
         eprintln!(
-            "usage: kekkai-probe write|read|env|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect|ptrace|io-uring|read-fd|connect-abstract|loopback ..."
+            "usage: kekkai-probe write|read|env|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect|ptrace|io-uring|personality|read-fd|connect-abstract|loopback ..."
         );
         return ExitCode::from(2);
     };
@@ -393,6 +393,24 @@ fn main() -> ExitCode {
             {
                 let _ = (path, host, port);
                 eprintln!("proxy-connect requires Unix");
+                ExitCode::from(2)
+            }
+        }
+        "personality" => {
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: probe only; 0xffffffff queries the current persona.
+                let rc = unsafe { libc::syscall(libc::SYS_personality, 0xffff_ffffu64) };
+                if rc < 0 {
+                    eprintln!("personality: {}", std::io::Error::last_os_error());
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("personality requires Linux");
                 ExitCode::from(2)
             }
         }
