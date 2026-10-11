@@ -1,4 +1,59 @@
 {
   "schema_version": 1,
-  "scenarios": []
+  "scenarios": [
+    {
+      "name": "unsandboxed",
+      "p50_ns": 458569,
+      "p95_ns": 523285,
+      "p99_ns": 561892,
+      "jobs_per_s": 2166.528478258562,
+      "jobs_per_s_parallel": 6361.7247320857505,
+      "samples": 80
+    },
+    {
+      "name": "none",
+      "p50_ns": 470827,
+      "p95_ns": 533645,
+      "p99_ns": 602562,
+      "jobs_per_s": 2109.3699012574416,
+      "jobs_per_s_parallel": 6270.86343398029,
+      "samples": 80
+    },
+    {
+      "name": "rlimit",
+      "p50_ns": 632898,
+      "p95_ns": 754207,
+      "p99_ns": 854345,
+      "jobs_per_s": 1548.9872163943814,
+      "jobs_per_s_parallel": 3869.5226720542328,
+      "samples": 80
+    },
+    {
+      "name": "linux_native",
+      "p50_ns": 1763261,
+      "p95_ns": 1875328,
+      "p99_ns": 1979381,
+      "jobs_per_s": 558.6998188114139,
+      "jobs_per_s_parallel": 1051.2472948071415,
+      "samples": 80
+    },
+    {
+      "name": "linux_native_allowlist",
+      "p50_ns": 21323947,
+      "p95_ns": 21537413,
+      "p99_ns": 21597712,
+      "jobs_per_s": 46.67307232181209,
+      "jobs_per_s_parallel": 178.83053940707185,
+      "samples": 80
+    },
+    {
+      "name": "linux_native_syscall_strict",
+      "p50_ns": 2059741,
+      "p95_ns": 2173929,
+      "p99_ns": 2301608,
+      "jobs_per_s": 482.2231660722672,
+      "jobs_per_s_parallel": 891.2725019739971,
+      "samples": 80
+    }
+  ]
 }
