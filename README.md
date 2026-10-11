@@ -47,8 +47,9 @@ interface, not a shipped adapter: [ADR 0003](docs/decisions/0003-guest-backend-i
 use std::process::Command;
 use kekkai::{Backend, Sandbox, Settings};
 
-let mut settings = Settings::default();
-settings.backend = Backend::LinuxNative;
+let settings = Settings::builder()
+    .backend(Backend::LinuxNative)
+    .build();
 let sandbox = kekkai::Sandbox::prepare(&settings, "/path/to/workspace")?;
 let mut cmd = Command::new("python3");
 sandbox.apply(&mut cmd)?;
@@ -79,6 +80,17 @@ calling thread.
 Known users: [shikigami](https://github.com/Sannrox/shikigami) (agent tool
 calls), where this code originated, and [kako](https://github.com/Sannrox/kako)
 (data transforms).
+
+## Compatibility
+
+kekkai follows semver. A change to what the sandbox allows or denies, which
+backend is selected, or how `health` is reported is a versioned change,
+never a patch-level surprise. In 0.x that is a minor bump.
+
+Public enums and `Settings` are `#[non_exhaustive]`. Construct `Settings`
+with [`Settings::builder`](crates/kekkai/src/lib.rs). Adding a field is
+not a breaking change on that path. The crate denies missing docs
+(`#![deny(missing_docs)]`) and declares `rust-version = "1.97.1"`.
 
 ## Development
 

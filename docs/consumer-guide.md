@@ -108,6 +108,10 @@ Overflow is drained so the child cannot fill the pipe.
 
 ## Recommended settings
 
+Construct `Settings` with `Settings::builder`. Public enums and
+`Settings` are `#[non_exhaustive]`, so adding a field later is not a
+breaking change on that path.
+
 **Data transform** (Python/DuckDB): `linux_native`, `Network::Deny`,
 `inputs` = input directory, `output` or workspace = output directory,
 `cgroup.memory_max` around 512 MiB. See [`examples/transform.rs`](../examples/transform.rs).

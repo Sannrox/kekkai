@@ -60,6 +60,11 @@ sandbox enforces is listed here.
   (Landlock ABI 6). cargo-fuzz targets for `Settings` and path handling,
   with an optional CI job that is not a required merge check.
 
+- `Settings::builder`, `#[non_exhaustive]` on public enums and settings
+  structs, `#![deny(missing_docs)]`, and `rust-version = "1.97.1"`. Adding
+  a field to `Settings` is not a breaking change for builder callers.
+  Enforcement changes stay versioned; they are never a patch-level surprise.
+
 ### Changed
 
 - `linux_native` denies `ptrace` in the seccomp filter.

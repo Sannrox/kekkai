@@ -24,10 +24,9 @@ fn take_path(data: &mut &[u8]) -> PathBuf {
 
 fuzz_target!(|data: &[u8]| {
     let mut rest = data;
-    let mut settings = Settings {
-        backend: Backend::LinuxNative,
-        ..Settings::default()
-    };
+    let mut settings = Settings::builder()
+        .backend(Backend::LinuxNative)
+        .build();
     if rest.first().copied().unwrap_or(0) & 1 == 1 {
         settings.backend = Backend::None;
     }

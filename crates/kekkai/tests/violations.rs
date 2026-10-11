@@ -25,10 +25,7 @@ fn linux_native_ready() -> Option<(Settings, tempfile::TempDir, PathBuf)> {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("ws");
     fs::create_dir_all(&workspace).unwrap();
-    let mut settings = Settings {
-        backend: Backend::LinuxNative,
-        ..Settings::default()
-    };
+    let mut settings = Settings::builder().backend(Backend::LinuxNative).build();
     let probe_dir = probe_exe()
         .parent()
         .expect("kekkai-probe has a parent directory")
@@ -38,6 +35,10 @@ fn linux_native_ready() -> Option<(Settings, tempfile::TempDir, PathBuf)> {
         Health::Ok(_) => Some((settings, tmp, workspace)),
         Health::Warning(message) | Health::Error(message) => {
             skip(&format!("linux_native unavailable: {message}"));
+            None
+        }
+        _ => {
+            skip("unrecognized health variant");
             None
         }
     }
@@ -59,10 +60,7 @@ fn probe(args: &[&str]) -> Command {
 
 #[test]
 fn health_reports_violation_capability() {
-    let settings = Settings {
-        backend: Backend::LinuxNative,
-        ..Settings::default()
-    };
+    let settings = Settings::builder().backend(Backend::LinuxNative).build();
     match kekkai::health(&settings) {
         Health::Ok(message) => {
             assert!(
@@ -74,6 +72,7 @@ fn health_reports_violation_capability() {
         }
         Health::Error(_) => skip("linux_native unavailable"),
         Health::Warning(message) => panic!("linux_native must not warn: {message}"),
+        _ => skip("unrecognized health variant"),
     }
 }
 
@@ -159,5 +158,6 @@ fn filesystem_denials_are_unavailable_not_an_empty_success() {
             assert!(message.contains("fs_violations=unavailable"), "{message}");
         }
         Health::Error(message) => skip(&format!("health error: {message}")),
+        _ => skip("unrecognized health variant"),
     }
 }

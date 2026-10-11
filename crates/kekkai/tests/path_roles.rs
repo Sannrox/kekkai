@@ -25,10 +25,7 @@ fn linux_native_ready() -> Option<(Settings, tempfile::TempDir, PathBuf)> {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("ws");
     fs::create_dir_all(&workspace).unwrap();
-    let mut settings = Settings {
-        backend: Backend::LinuxNative,
-        ..Settings::default()
-    };
+    let mut settings = Settings::builder().backend(Backend::LinuxNative).build();
     let probe_dir = probe_exe()
         .parent()
         .expect("kekkai-probe has a parent directory")
@@ -38,6 +35,10 @@ fn linux_native_ready() -> Option<(Settings, tempfile::TempDir, PathBuf)> {
         Health::Ok(_) => Some((settings, tmp, workspace)),
         Health::Warning(message) | Health::Error(message) => {
             skip(&format!("linux_native unavailable: {message}"));
+            None
+        }
+        _ => {
+            skip("unrecognized health variant");
             None
         }
     }

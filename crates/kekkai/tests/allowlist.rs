@@ -38,19 +38,22 @@ fn allowlist_ready() -> Option<(Settings, tempfile::TempDir, PathBuf, u16)> {
         .parent()
         .expect("kekkai-probe has a parent directory")
         .to_path_buf();
-    let settings = Settings {
-        backend: Backend::LinuxNative,
-        network: Network::Allowlist(vec![AllowHost {
+    let settings = Settings::builder()
+        .backend(Backend::LinuxNative)
+        .network(Network::Allowlist(vec![AllowHost {
             host: "127.0.0.1".into(),
             port: Some(port),
-        }]),
-        readable_roots: vec![probe_dir],
-        ..Settings::default()
-    };
+        }]))
+        .readable_roots(vec![probe_dir])
+        .build();
     match kekkai::health(&settings) {
         Health::Ok(_) => Some((settings, tmp, workspace, port)),
         Health::Warning(message) | Health::Error(message) => {
             skip(&format!("allowlist unavailable: {message}"));
+            None
+        }
+        _ => {
+            skip("unrecognized health variant");
             None
         }
     }
@@ -153,19 +156,22 @@ fn hostname_allowlist_does_not_match_a_raw_ip() {
     let workspace = tmp.path().join("ws");
     fs::create_dir_all(&workspace).unwrap();
     let probe_dir = probe_exe().parent().unwrap().to_path_buf();
-    let settings = Settings {
-        backend: Backend::LinuxNative,
-        network: Network::Allowlist(vec![AllowHost {
+    let settings = Settings::builder()
+        .backend(Backend::LinuxNative)
+        .network(Network::Allowlist(vec![AllowHost {
             host: "example.com".into(),
             port: Some(443),
-        }]),
-        readable_roots: vec![probe_dir],
-        ..Settings::default()
-    };
+        }]))
+        .readable_roots(vec![probe_dir])
+        .build();
     match kekkai::health(&settings) {
         Health::Ok(_) => {}
         Health::Warning(message) | Health::Error(message) => {
             skip(&format!("allowlist unavailable: {message}"));
+            return;
+        }
+        _ => {
+            skip("unrecognized health variant");
             return;
         }
     }

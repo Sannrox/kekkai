@@ -19,11 +19,10 @@ fn probe_exe() -> PathBuf {
 }
 
 fn cgroup_settings(limits: CgroupLimits) -> Settings {
-    Settings {
-        backend: Backend::Rlimit,
-        cgroup: limits,
-        ..Settings::default()
-    }
+    Settings::builder()
+        .backend(Backend::Rlimit)
+        .cgroup(limits)
+        .build()
 }
 
 fn delegated_or_skip() -> Option<Settings> {
@@ -39,6 +38,10 @@ fn delegated_or_skip() -> Option<Settings> {
         Health::Ok(_) => Some(settings),
         Health::Warning(message) | Health::Error(message) => {
             skip(&format!("no delegated cgroup v2 subtree: {message}"));
+            None
+        }
+        _ => {
+            skip("unrecognized health variant");
             None
         }
     }
@@ -115,14 +118,13 @@ fn large_virtual_mapping_fails_under_rlimit_as() {
         return;
     }
     let tmp = tempfile::tempdir().unwrap();
-    let settings = Settings {
-        backend: Backend::Rlimit,
-        limits: Limits {
+    let settings = Settings::builder()
+        .backend(Backend::Rlimit)
+        .limits(Limits {
             memory_mb: Some(512),
             ..Limits::default()
-        },
-        ..Settings::default()
-    };
+        })
+        .build();
     let sandbox = Sandbox::prepare(&settings, tmp.path()).expect("prepare");
     let mut cmd = Command::new(probe_exe());
     cmd.args(["mmap-va", &(512 * 1024 * 1024).to_string()]);
