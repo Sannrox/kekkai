@@ -53,7 +53,8 @@ bash scripts/validate-workflow-skills.sh
 - `cargo fmt --all` formats before review.
 - `cargo clippy ... -D warnings` is required for ship-level local gates.
 - `scripts/validate-workflow-skills.sh` clones or updates agent-kit and checks
-  that the skill stubs, vendored scripts, `.agents/project.md` and this file
+  that the skill stubs, vendored scripts and this file (including
+  `## Agent skill profile`)
   match it.
 
 There is no Makefile yet. When one is added, its targets become the source of
@@ -77,14 +78,55 @@ skill; read the installed skill under `~/.agents/agent-kit/` (or
 `$AGENT_KIT_HOME`). Run `bash scripts/validate-workflow-skills.sh` to clone or
 update it.
 
-- Repository-specific facts the shared Skills need (boundaries, shared
-  surfaces, verification matrix, release audit) live in `.agents/project.md`.
-  Edit that file, not the stubs.
+- Repository-specific facts the shared Skills need come from this file: the
+  ownership, structure, parallel-lane and testing sections, plus
+  `## Agent skill profile` below for anything they do not already say. Edit
+  this file, not the stubs.
 - Never edit stubs or vendored `scripts/gh-verified-push.sh` and
   `scripts/validate-workflow-skills.sh` here; change them upstream in
   agent-kit, then run `bash scripts/validate-workflow-skills.sh --render` here
   when CI reports drift.
 - Repository-only Skills live next to the stubs as full folders and stay local.
+
+## Agent skill profile
+
+Facts the shared agent-kit skills read that the sections above do not already
+state.
+
+Feature: a new observable operator or integration outcome.
+
+### Compatibility and failure obligations
+
+The SemVer class of every change, consumers that must bump their pin, hosts
+whose kernel lacks a feature, and behavior parity with code ported from
+another project.
+
+### Additional impact boundaries
+
+- backend selection and host detection: an unavailable backend is an error,
+  never a silent downgrade;
+- `pre_exec` safety between fork and exec;
+- public API and SemVer: settings types, prepare/apply, health report;
+- known users pinning a version must be able to upgrade.
+
+### Verification matrix
+
+Rows beyond `## Testing Guidelines`:
+
+| Surface | Required evidence |
+| --- | --- |
+| `pre_exec` code | review for async-signal safety (no allocation, locks, logging); `// SAFETY:` on every `unsafe` |
+| backend selection / host detection | unsupported backend is an error, not a downgrade; health output covered by tests |
+| public API | SemVer impact stated; docs updated; impact on known users named |
+
+### Release audit
+
+- workspace version, lockfile, and the git tag consumers pin;
+- SemVer class: any change to what is allowed or denied, backend selection, or
+  health reporting is at least a minor change before `1.0` and is called out;
+- impact on known users and the upgrade each needs;
+- supported kernels and behavior when a feature is missing;
+- security notes for any enforcement fix.
 
 ## Agent delivery closeout (required)
 
