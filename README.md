@@ -4,8 +4,11 @@ A small Rust library for sandboxing child processes on Linux: a filesystem
 allowlist (Landlock), a syscall and network gate (seccomp), and resource
 limits, applied to a `std::process::Command` before it spawns.
 
-See [ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md)
-and [ADR 0003](docs/decisions/0003-guest-backend-interface.md).
+See the [consumer guide](docs/consumer-guide.md) for backends, `health`,
+recommended settings, and failure modes. Examples live in
+[`examples/`](examples/). Architecture:
+[ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md) and
+[ADR 0003](docs/decisions/0003-guest-backend-interface.md).
 Not yet published to crates.io.
 
 ## What it does
@@ -73,6 +76,7 @@ calls), where this code originated, and [kako](https://github.com/Sannrox/kako)
 
 ```bash
 cargo build
+cargo build --examples
 cargo test
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings

@@ -19,6 +19,14 @@ doc = false
 test = false
 bench = false
 
+[[example]]
+name = "transform"
+path = "../../examples/transform.rs"
+
+[[example]]
+name = "agent_shell"
+path = "../../examples/agent_shell.rs"
+
 [features]
 default = []
 tokio = ["dep:tokio"]
