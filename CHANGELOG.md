@@ -13,6 +13,11 @@ sandbox enforces is listed here.
   `Sandbox::prepare` out, `apply` on `std::process::Command` before spawn.
 - Landlock filesystem allowlist with ABI 3 as the floor, a seccomp socket
   gate when `Network::Deny`, rlimits, and a child process group.
+- Explicit device grants (`Settings.devices`): extra character or block
+  device nodes under `linux_native` / `userspace`. Default is none beyond
+  `/dev/null`, `/dev/zero`, `/dev/urandom`, and `/dev/random`. Missing
+  or non-device paths are `Error::Invalid`. Enforcement is Landlock
+  (open, and ioctl on ABI 5+).
 - Host capability detection (`capabilities`) and `health` reporting.
   Selecting a backend the host cannot provide returns `Error::Unsupported`
   or `Error::Unavailable`; there is no silent downgrade.

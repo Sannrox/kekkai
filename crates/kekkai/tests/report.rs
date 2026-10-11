@@ -13,6 +13,7 @@ fn run_report_json_round_trips() {
     assert_eq!(report.settings.namespaces, "off");
     assert_eq!(report.settings.filesystem_view, "host");
     assert!(!report.settings.cgroup);
+    assert_eq!(report.settings.devices, 0);
     let json = report.to_json().expect("to_json");
     assert!(
         json.contains("\"schema_version\":1"),

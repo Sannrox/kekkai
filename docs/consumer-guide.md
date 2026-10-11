@@ -53,6 +53,10 @@ Under `linux_native`:
   Everything else is denied by Landlock. An input that is the same as,
   or lives under, a writable role (output, workspace-as-output,
   `writable_roots`, or scratch) is `Error::Invalid`.
+- `devices` are extra character or block device nodes (for example
+  `/dev/dri/card0`). Default is none beyond `/dev/null`, `/dev/zero`,
+  `/dev/urandom`, and `/dev/random`. Paths must exist at prepare.
+  Landlock mediates open and, on ABI 5+, device ioctl.
 - `TMPDIR` is a private scratch directory created for the run and
   removed when the sandbox is dropped. Each `prepare` gets a unique
   directory.

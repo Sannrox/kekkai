@@ -52,7 +52,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(action) = args.next() else {
         eprintln!(
-            "usage: kekkai-probe write|read|env|socket|write-bytes|write-sync-bytes|write-sync-loop|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect|ptrace|io-uring|personality|read-fd|connect-abstract|loopback ..."
+            "usage: kekkai-probe write|read|env|open|socket|write-bytes|write-sync-bytes|write-sync-loop|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect|ptrace|io-uring|personality|read-fd|connect-abstract|loopback ..."
         );
         return ExitCode::from(2);
     };
@@ -96,6 +96,18 @@ fn main() -> ExitCode {
                 }
                 Err(_) => {
                     eprintln!("env {name} unset");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "open" => {
+            let Some(path) = args.next() else {
+                return ExitCode::from(2);
+            };
+            match fs::OpenOptions::new().read(true).write(true).open(&path) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("open {path}: {error}");
                     ExitCode::FAILURE
                 }
             }

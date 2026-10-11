@@ -186,6 +186,7 @@ pub(super) fn prepare(
     output: Option<&Path>,
     readable_roots: &[PathBuf],
     writable_roots: &[PathBuf],
+    devices: &[PathBuf],
 ) -> Result<Arc<LinuxPrepared>, Error> {
     let abi = require_abi(probe_abi()?)?;
     let workspace = fs::canonicalize(workspace).map_err(|error| {
@@ -197,6 +198,7 @@ pub(super) fn prepare(
     let inputs = canonicalize_all(inputs, "inputs")?;
     let readable_roots = canonicalize_all(readable_roots, "readable_roots")?;
     let writable_roots = canonicalize_all(writable_roots, "writable_roots")?;
+    let devices = canonicalize_devices(devices)?;
     let output = match output {
         Some(path) => fs::canonicalize(path)
             .map_err(|error| Error::invalid(format!("output `{}`: {error}", path.display())))?,
@@ -232,8 +234,30 @@ pub(super) fn prepare(
         &inputs,
         &readable_roots,
         &writable_roots,
+        &devices,
     )?;
     Ok(Arc::new(prepared))
+}
+
+fn canonicalize_devices(paths: &[PathBuf]) -> Result<Vec<PathBuf>, Error> {
+    use std::os::unix::fs::FileTypeExt;
+
+    paths
+        .iter()
+        .map(|path| {
+            let meta = fs::metadata(path)
+                .map_err(|error| Error::invalid(format!("device `{}`: {error}", path.display())))?;
+            let kind = meta.file_type();
+            if !kind.is_char_device() && !kind.is_block_device() {
+                return Err(Error::invalid(format!(
+                    "device `{}` is not a character or block device",
+                    path.display()
+                )));
+            }
+            fs::canonicalize(path)
+                .map_err(|error| Error::invalid(format!("device `{}`: {error}", path.display())))
+        })
+        .collect()
 }
 
 fn canonicalize_all(paths: &[PathBuf], label: &str) -> Result<Vec<PathBuf>, Error> {
@@ -625,6 +649,7 @@ fn add_path_rules(
     inputs: &[PathBuf],
     extra_read_only: &[PathBuf],
     extra_writable: &[PathBuf],
+    devices: &[PathBuf],
 ) -> Result<(), Error> {
     let read_dir = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE | ACCESS_FS_READ_DIR;
     let read_file = ACCESS_FS_EXECUTE | ACCESS_FS_READ_FILE;
@@ -645,6 +670,9 @@ fn add_path_rules(
     }
     for path in WRITABLE_DEVS {
         add_existing(ruleset, Path::new(path), write_dev | ioctl_bit(abi), abi)?;
+    }
+    for path in devices {
+        add_path(ruleset, path, write_dev | ioctl_bit(abi), abi)?;
     }
     add_path(ruleset, output, write_dir, abi)?;
     add_path(ruleset, scratch, write_dir, abi)?;
