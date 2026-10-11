@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(action) = args.next() else {
         eprintln!(
-            "usage: kekkai-probe write|read|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr ..."
+            "usage: kekkai-probe write|read|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect ..."
         );
         return ExitCode::from(2);
     };
@@ -267,6 +267,85 @@ fn main() -> ExitCode {
             }
             let _ = out.flush();
             ExitCode::SUCCESS
+        }
+        "connect-tcp" => {
+            let Some(host) = args.next() else {
+                return ExitCode::from(2);
+            };
+            let Some(port) = args.next().and_then(|s| s.parse::<u16>().ok()) else {
+                return ExitCode::from(2);
+            };
+            match std::net::TcpStream::connect((host.as_str(), port)) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("connect-tcp {host}:{port}: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "connect-unix" => {
+            let Some(path) = args.next() else {
+                return ExitCode::from(2);
+            };
+            #[cfg(unix)]
+            {
+                match std::os::unix::net::UnixStream::connect(&path) {
+                    Ok(_) => ExitCode::SUCCESS,
+                    Err(error) => {
+                        eprintln!("connect-unix {path}: {error}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                eprintln!("connect-unix requires Unix");
+                ExitCode::from(2)
+            }
+        }
+        "proxy-connect" => {
+            let Some(path) = args.next() else {
+                return ExitCode::from(2);
+            };
+            let Some(host) = args.next() else {
+                return ExitCode::from(2);
+            };
+            let Some(port) = args.next().and_then(|s| s.parse::<u16>().ok()) else {
+                return ExitCode::from(2);
+            };
+            #[cfg(unix)]
+            {
+                use std::io::{Read, Write};
+                let mut stream = match std::os::unix::net::UnixStream::connect(&path) {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        eprintln!("proxy-connect {path}: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n");
+                if stream.write_all(req.as_bytes()).is_err() {
+                    return ExitCode::FAILURE;
+                }
+                let mut buf = [0_u8; 256];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                if head.starts_with("HTTP/1.1 200") {
+                    let _ = stream.write_all(b"ping");
+                    let _ = stream.read(&mut buf);
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!("proxy-connect {host}:{port}: {head}");
+                    ExitCode::FAILURE
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (path, host, port);
+                eprintln!("proxy-connect requires Unix");
+                ExitCode::from(2)
+            }
         }
         other => {
             eprintln!("unknown action {other}");

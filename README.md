@@ -17,6 +17,8 @@ Not yet published to crates.io.
   allow (Landlock, ABI 3 or newer).
 - **No network by default:** a seccomp filter denies socket creation.
   `Network::Allow` leaves sockets to the host; filesystem rules still apply.
+  `Network::Allowlist` permits listed hosts through a parent CONNECT proxy
+  on a unix socket; direct IP sockets fail.
 - **Resource limits:** rlimits, plus opt-in cgroup v2 `memory.max`,
   `pids.max`, and `cpu.max` when a delegated subtree is available.
   Requesting cgroup limits without one is an error, never a fallback to
@@ -64,8 +66,8 @@ calling thread.
 
 - Scheduling, image management, or orchestration of containers or VMs.
 - Deciding what runs, retries, or auditing. That belongs to the caller.
-- Network policy by destination address (Landlock and seccomp cannot express
-  it).
+- Letting the child open its own IP sockets to listed hosts.
+  `Network::Allowlist` is a parent CONNECT proxy on a unix socket.
 - Real isolation on non-Linux platforms.
 
 Known users: [shikigami](https://github.com/Sannrox/shikigami) (agent tool

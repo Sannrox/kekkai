@@ -146,7 +146,7 @@ pub(super) fn probe_enforcement() -> Result<u32, Error> {
             if libc::syscall(SYS_landlock_restrict_self, ruleset_fd, 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            let (filter, filter_len) = socket_filter(true);
+            let (filter, filter_len) = socket_filter(SocketPolicy::Deny);
             let mut prog = libc::sock_fprog {
                 len: filter_len,
                 filter: filter.as_ptr().cast_mut(),
@@ -207,10 +207,17 @@ pub(super) fn prepare(
     Ok(Arc::new(prepared))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SocketPolicy {
+    Allow,
+    Deny,
+    UnixOnly,
+}
+
 pub(super) fn apply(
     command: &mut Command,
     limits: Limits,
-    deny_sockets: bool,
+    sockets: SocketPolicy,
     cgroup_procs_fd: Option<i32>,
     prepared: Arc<LinuxPrepared>,
 ) -> Result<(), Error> {
@@ -234,7 +241,7 @@ pub(super) fn apply(
             if libc::syscall(SYS_landlock_restrict_self, prepared.ruleset.as_raw_fd(), 0) != 0 {
                 return Err(io::Error::last_os_error());
             }
-            let (filter, filter_len) = socket_filter(deny_sockets);
+            let (filter, filter_len) = socket_filter(sockets);
             let mut prog = libc::sock_fprog {
                 len: filter_len,
                 filter: filter.as_ptr().cast_mut(),
@@ -485,7 +492,7 @@ fn jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
     libc::sock_filter { code, jt, jf, k }
 }
 
-fn socket_filter(deny_sockets: bool) -> ([libc::sock_filter; 64], u16) {
+fn socket_filter(sockets: SocketPolicy) -> ([libc::sock_filter; 64], u16) {
     let mut filter = [stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW); 64];
     let mut i = 0;
     let push = |filter: &mut [libc::sock_filter; 64], i: &mut usize, insn: libc::sock_filter| {
@@ -517,17 +524,39 @@ fn socket_filter(deny_sockets: bool) -> ([libc::sock_filter; 64], u16) {
         &mut i,
         stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
     );
-    if deny_sockets {
-        push(
-            &mut filter,
-            &mut i,
-            jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_socket as u32, 0, 1),
-        );
-        push(
-            &mut filter,
-            &mut i,
-            stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
-        );
+    if matches!(sockets, SocketPolicy::Deny | SocketPolicy::UnixOnly) {
+        if matches!(sockets, SocketPolicy::UnixOnly) {
+            // socket(): only AF_UNIX. Direct IP (including raw-IP / DNS bypass)
+            // cannot be created.
+            push(
+                &mut filter,
+                &mut i,
+                jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_socket as u32, 0, 4),
+            );
+            push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 16));
+            push(
+                &mut filter,
+                &mut i,
+                jump(BPF_JMP | BPF_JEQ | BPF_K, libc::AF_UNIX as u32, 1, 0),
+            );
+            push(
+                &mut filter,
+                &mut i,
+                stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
+            );
+            push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 0));
+        } else {
+            push(
+                &mut filter,
+                &mut i,
+                jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_socket as u32, 0, 1),
+            );
+            push(
+                &mut filter,
+                &mut i,
+                stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO_EPERM),
+            );
+        }
         // socketpair: only AF_UNIX SOCK_STREAM (pipes, git). Datagram pairs can
         // sendto() a host pathname socket such as /dev/log.
         push(
@@ -617,13 +646,19 @@ mod tests {
 
     #[test]
     fn socket_filter_fits_the_fixed_program() {
-        let (_filter, len) = socket_filter(true);
+        let (_filter, len) = socket_filter(SocketPolicy::Deny);
         assert!(len > 8 && len <= 64, "deny sockets len={len}");
-        let (_filter, len) = socket_filter(false);
+        let (_filter, len) = socket_filter(SocketPolicy::Allow);
         assert!(len > 4 && len <= 64, "allow sockets len={len}");
+        let (_filter, len) = socket_filter(SocketPolicy::UnixOnly);
+        assert!(len > 8 && len <= 64, "unix-only sockets len={len}");
         assert!(
-            socket_filter(true).1 > socket_filter(false).1,
+            socket_filter(SocketPolicy::Deny).1 > socket_filter(SocketPolicy::Allow).1,
             "denying sockets must add instructions"
+        );
+        assert!(
+            socket_filter(SocketPolicy::UnixOnly).1 > socket_filter(SocketPolicy::Deny).1,
+            "unix-only must add the AF_UNIX check"
         );
     }
 }

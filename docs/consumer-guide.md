@@ -47,6 +47,15 @@ Under `linux_native`:
 - `TMPDIR` is a scratch directory created for the run.
 - `Network::Deny` (the default) makes `socket()` fail with `EPERM`.
   `Network::Allow` leaves sockets to the host; filesystem rules still apply.
+  `Network::Allowlist` allows only `AF_UNIX` sockets, starts a CONNECT
+  proxy on a unix socket in scratch, and injects `KEKKAI_PROXY` plus
+  `ALL_PROXY` / `HTTP_PROXY` / `HTTPS_PROXY` as `unix://` URLs (and
+  clears `NO_PROXY`). Clients that only understand `http://host:port`
+  proxies cannot open IP sockets to reach a TCP proxy; they must speak
+  CONNECT to `KEKKAI_PROXY`. Direct IP (including raw IP and DNS-bypass)
+  fails at `socket()`. CONNECT matching is the target string, not DNS.
+  Requires Landlock ABI 6 (abstract unix scoping). Denied CONNECT
+  targets appear in `ChildUsage.violations`.
 - Rlimits from `Settings.limits` are installed in `pre_exec`.
 - The child is placed in its own process group so timeout and shutdown
   can signal the whole group.
@@ -68,8 +77,8 @@ Overflow is drained so the child cannot fill the pipe.
 
 ## What is not enforced
 
-- Destination-based network policy. Landlock and seccomp cannot express
-  "this host only".
+- Letting the child open its own TCP/UDP sockets to listed hosts.
+  `Network::Allowlist` is proxy-mediated: IP `socket()` stays denied.
 - Scheduling, image management, or orchestration.
 - What command to run, retries, or audit logs. Those belong to the caller.
 - Real isolation on non-Linux hosts. `linux_native` is unsupported there;
@@ -100,7 +109,8 @@ this job here", not as a cue to switch backends.
 | `Error::Unavailable` | Kernel lacks Landlock ABI 3, seccomp, or a delegated cgroup v2 subtree. |
 | `Error::Invalid` | Zero limits, relative roots, cgroup on `none`, `cpu_period_us` without quota. |
 | Child `EACCES` / Landlock denial | Path not on the allowlist. |
-| Child `EPERM` on `socket()` | `Network::Deny`. |
+| Child `EPERM` on `socket()` | `Network::Deny`, or IP sockets under `Allowlist`. |
+| `ChildUsage.violations` with `ViolationKind::Network` | CONNECT to a host/port not on the allowlist. |
 | `timed_out` | Wall-clock helper expired; the group was killed. |
 | `oom_killed` | cgroup `memory.max` (or `memory.events`) fired. |
 | Truncated capture | Stream exceeded its byte cap; `dropped` is the discarded count. |

@@ -32,6 +32,8 @@ mod capture;
 mod cgroup;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod proxy;
 
 pub use capture::StreamCapture;
 
@@ -58,13 +60,43 @@ impl fmt::Display for Backend {
 }
 
 /// Whether the child may create network sockets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Network {
     /// `socket()` fails with `EPERM`. This is the default.
     #[default]
     Deny,
     /// Socket creation is left to the host. Filesystem rules still apply.
     Allow,
+    /// Only `AF_UNIX` sockets. The parent runs a CONNECT proxy on a unix
+    /// socket in scratch and injects `*_PROXY` environment variables.
+    /// Direct IP sockets fail. Requires Landlock ABI 6.
+    Allowlist(Vec<AllowHost>),
+}
+
+/// One host (and optional port) permitted through [`Network::Allowlist`].
+///
+/// Matching is by the CONNECT target string, not by DNS. A raw IP does not
+/// match a hostname entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowHost {
+    pub host: String,
+    pub port: Option<u16>,
+}
+
+/// Kind of recorded sandbox denial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViolationKind {
+    /// The egress proxy refused a CONNECT target.
+    Network,
+}
+
+/// One denial class observed for a child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxViolation {
+    pub kind: ViolationKind,
+    /// Host:port for network denials.
+    pub detail: String,
+    pub count: u64,
 }
 
 /// Opt-in cgroup v2 limits. Empty means do not use a cgroup.
@@ -107,6 +139,8 @@ pub struct ChildUsage {
     pub cpu_usec: Option<u64>,
     /// True when [`Sandbox::spawn_with_deadline`] expired the wall-clock limit.
     pub timed_out: bool,
+    /// Denials recorded for this child (egress proxy today).
+    pub violations: Vec<SandboxViolation>,
 }
 
 /// Which end of a captured stream to keep when it exceeds the cap.
@@ -338,9 +372,18 @@ fn linux_native_health(settings: &Settings) -> Health {
     match linux::probe_enforcement() {
         Ok(abi) => {
             let signal = if abi >= 6 { "landlock" } else { "none" };
-            let network = match settings.network {
-                Network::Deny => "deny",
-                Network::Allow => "allow",
+            if matches!(settings.network, Network::Allowlist(_)) && abi < 6 {
+                return Health::Error(
+                    "Network::Allowlist requires Landlock ABI 6 (abstract unix socket scoping)"
+                        .into(),
+                );
+            }
+            let network = match &settings.network {
+                Network::Deny => "deny".to_string(),
+                Network::Allow => "allow".to_string(),
+                Network::Allowlist(hosts) => {
+                    format!("allowlist={hosts_len}", hosts_len = hosts.len())
+                }
             };
             Health::Ok(format!(
                 "sandbox:   backend=linux_native abi={abi} network={network} signal_scoping={signal} writable=workspace+scratch+{} readable={} cpu={:?} memory_mb={:?} user_processes={:?}",
@@ -368,6 +411,8 @@ pub struct Sandbox {
     linux: Option<Arc<linux::LinuxPrepared>>,
     #[cfg(target_os = "linux")]
     cgroup: Option<Arc<cgroup::CgroupPrepared>>,
+    #[cfg(target_os = "linux")]
+    proxy: Option<Arc<proxy::EgressProxy>>,
 }
 
 impl Sandbox {
@@ -401,6 +446,17 @@ impl Sandbox {
                 settings.cgroup_root.as_deref(),
             )?))
         };
+        #[cfg(target_os = "linux")]
+        let proxy = match (&settings.network, &linux) {
+            (Network::Allowlist(hosts), Some(prepared)) => {
+                let path = prepared.scratch.join("proxy.sock");
+                Some(
+                    proxy::EgressProxy::start(path, hosts.clone())
+                        .map_err(|error| Error::invalid(format!("egress proxy: {error}")))?,
+                )
+            }
+            _ => None,
+        };
         #[cfg(not(target_os = "linux"))]
         let _ = root;
         Ok(Self {
@@ -409,6 +465,8 @@ impl Sandbox {
             linux,
             #[cfg(target_os = "linux")]
             cgroup,
+            #[cfg(target_os = "linux")]
+            proxy,
         })
     }
 
@@ -461,10 +519,28 @@ impl Sandbox {
             .linux
             .clone()
             .ok_or_else(|| Error::invalid("linux_native ruleset was not prepared"))?;
+        if let Some(proxy) = &self.proxy {
+            let path = proxy.path.display().to_string();
+            let url = format!("unix://{path}");
+            command.env("KEKKAI_PROXY", &path);
+            command.env("ALL_PROXY", &url);
+            command.env("all_proxy", &url);
+            command.env("HTTP_PROXY", &url);
+            command.env("HTTPS_PROXY", &url);
+            command.env("http_proxy", &url);
+            command.env("https_proxy", &url);
+            command.env_remove("NO_PROXY");
+            command.env_remove("no_proxy");
+        }
+        let sockets = match &self.settings.network {
+            Network::Allow => linux::SocketPolicy::Allow,
+            Network::Allowlist(_) => linux::SocketPolicy::UnixOnly,
+            Network::Deny => linux::SocketPolicy::Deny,
+        };
         linux::apply(
             command,
             rlimit_values(&self.settings),
-            matches!(self.settings.network, Network::Deny),
+            sockets,
             self.cgroup_procs_fd(),
             prepared,
         )
@@ -727,10 +803,15 @@ impl Sandbox {
     pub fn finish(&self) -> ChildUsage {
         #[cfg(target_os = "linux")]
         {
-            self.cgroup
+            let mut usage = self
+                .cgroup
                 .as_ref()
                 .map(|prepared| prepared.usage())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            if let Some(proxy) = &self.proxy {
+                usage.violations = proxy.violations();
+            }
+            usage
         }
         #[cfg(not(target_os = "linux"))]
         ChildUsage::default()
@@ -833,6 +914,29 @@ fn validate(settings: &Settings) -> Result<(), Error> {
         return Err(Error::invalid(
             "cgroup limits require backend rlimit or linux_native",
         ));
+    }
+    match &settings.network {
+        Network::Allowlist(hosts) => {
+            if !matches!(settings.backend, Backend::LinuxNative) {
+                return Err(Error::invalid(
+                    "Network::Allowlist requires backend linux_native",
+                ));
+            }
+            if hosts.is_empty() {
+                return Err(Error::invalid(
+                    "Network::Allowlist must name at least one host",
+                ));
+            }
+            for host in hosts {
+                if host.host.is_empty() {
+                    return Err(Error::invalid("AllowHost.host must not be empty"));
+                }
+                if host.port == Some(0) {
+                    return Err(Error::invalid("AllowHost.port must be greater than zero"));
+                }
+            }
+        }
+        Network::Deny | Network::Allow => {}
     }
     for (name, value) in [
         ("cgroup.memory_max", settings.cgroup.memory_max),
@@ -983,6 +1087,33 @@ mod tests {
         settings.readable_roots.push("/usr".into());
         let error = Sandbox::prepare(&settings, ".").unwrap_err();
         assert!(error.to_string().contains("linux_native"), "{error}");
+    }
+
+    #[test]
+    fn allowlist_requires_linux_native() {
+        let settings = Settings {
+            network: Network::Allowlist(vec![AllowHost {
+                host: "example.com".into(),
+                port: Some(443),
+            }]),
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("linux_native"), "{error}");
+    }
+
+    #[test]
+    fn empty_allowlist_is_invalid() {
+        let settings = Settings {
+            backend: Backend::LinuxNative,
+            network: Network::Allowlist(Vec::new()),
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(
+            matches!(error, Error::Invalid { ref message } if message.contains("Allowlist")),
+            "{error}"
+        );
     }
 
     #[test]
