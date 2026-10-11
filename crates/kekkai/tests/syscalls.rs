@@ -93,42 +93,6 @@ fn python_readable_roots(python: &std::path::Path) -> Vec<PathBuf> {
             dir = d.parent();
         }
     }
-    let script = "import os, sys, site\n\
-seen = []\n\
-def add(p):\n\
-    if p and os.path.isdir(p) and p not in seen:\n\
-        seen.append(p)\n\
-add(sys.prefix)\n\
-add(sys.exec_prefix)\n\
-try:\n\
-    add(site.getusersitepackages())\n\
-except Exception:\n\
-    pass\n\
-try:\n\
-    for p in site.getsitepackages():\n\
-        add(p)\n\
-except Exception:\n\
-    pass\n\
-for p in sys.path:\n\
-    add(p)\n\
-print('\\n'.join(seen))\n";
-    let output = Command::new(python)
-        .args(["-c", script])
-        .output()
-        .unwrap_or_else(|error| panic!("python roots: {error}"));
-    assert!(
-        output.status.success(),
-        "python roots script failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    roots.extend(
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute() && p.is_dir()),
-    );
     roots
 }
 
