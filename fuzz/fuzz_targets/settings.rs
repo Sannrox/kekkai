@@ -1,6 +1,6 @@
 #![no_main]
 
-use kekkai::{Backend, CgroupLimits, Limits, Network, Sandbox, Settings, SyscallProfile};
+use kekkai::{Backend, CgroupLimits, IoMax, Limits, Network, Sandbox, Settings, SyscallProfile};
 use libfuzzer_sys::fuzz_target;
 use std::path::PathBuf;
 
@@ -35,6 +35,13 @@ fuzz_target!(|data: &[u8]| {
     if data.len() > 16 && data[2] & 1 == 1 {
         settings.cgroup = CgroupLimits {
             memory_max: Some(1024 * 1024),
+            cpu_weight: (data[2] & 2 == 2).then_some(100),
+            io_max: (data[2] & 4 == 4).then_some(IoMax {
+                major: 8,
+                minor: 0,
+                wbps: Some(1024),
+                ..IoMax::default()
+            }),
             ..CgroupLimits::default()
         };
     }

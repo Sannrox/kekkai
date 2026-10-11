@@ -15,10 +15,10 @@ Choose one. There is no fallback.
 | `rlimit` | Unix rlimits and a new process group. No filesystem or socket rules. | Resource caps on a host that cannot run Landlock/seccomp, or as a first cut. |
 | `linux_native` | Landlock filesystem allowlist (ABI 3 floor) plus a seccomp filter that denies `socket()` when `Network::Deny`. Rlimits and a process group. | Default for untrusted children on Linux. |
 
-Opt-in cgroup v2 limits (`memory.max`, `memory.high`, `pids.max`, `cpu.max`)
-attach to `rlimit` or `linux_native`. They require a writable delegated
-subtree. Missing delegation is `Error::Unavailable`; kekkai never falls
-back to `RLIMIT_AS`.
+Opt-in cgroup v2 limits (`memory.max`, `memory.high`, `pids.max`, `cpu.max`,
+`cpu.weight`, `io.max`) attach to `rlimit` or `linux_native`. They require
+a writable delegated subtree. Missing delegation or a missing controller
+is `Error::Unavailable`; kekkai never falls back to `RLIMIT_AS`.
 
 Guest isolation (a userspace kernel or a KVM microVM) is an accepted
 interface, not a shipped adapter. See
@@ -94,8 +94,9 @@ Under `linux_native`:
 Under `rlimit`, only rlimits and the process group apply.
 
 When cgroup limits are set, the child joins the prepared cgroup in
-`pre_exec`. After exit, `Sandbox::finish` reports `oom_killed`, peak
-memory, and CPU usage.
+`pre_exec`. `Sandbox::usage` is a live snapshot (`memory.current`, CPU,
+IO, pids). After exit, `Sandbox::finish` reports `oom_killed`, those
+counters, and violations.
 
 `Sandbox::spawn_with_deadline` sends `SIGTERM` at a wall-clock limit,
 waits `term_grace`, then `SIGKILL`s the process group and writes
@@ -156,8 +157,8 @@ this job here", not as a cue to switch backends.
 | Symptom | Cause |
 | --- | --- |
 | `Error::Unsupported` | Backend is not implemented on this OS. |
-| `Error::Unavailable` | Kernel lacks Landlock ABI 3, seccomp, or a delegated cgroup v2 subtree. |
-| `Error::Invalid` | Zero limits, relative roots, overlapping path roles, cgroup on `none`, `cpu_period_us` without quota. |
+| `Error::Unavailable` | Kernel lacks Landlock ABI 3, seccomp, a delegated cgroup v2 subtree, or a requested cgroup controller (`io`, `cpu`). |
+| `Error::Invalid` | Zero limits, relative roots, overlapping path roles, cgroup on `none`, `cpu_period_us` without quota, `cpu_weight` outside 1..=10000, empty `io.max`. |
 | Child `EACCES` / Landlock denial | Path not on the allowlist. |
 | Child `EPERM` on `socket()` | `Network::Deny`, or IP sockets under `Allowlist`. |
 | Child `EPERM` on another syscall | `SyscallProfile::Strict` or `Python` does not allow that syscall. |
