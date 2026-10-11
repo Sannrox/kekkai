@@ -296,6 +296,7 @@ fn syscall_name(nr: i32) -> String {
         x if x == libc::SYS_io_uring_setup => "io_uring_setup",
         x if x == libc::SYS_io_uring_enter => "io_uring_enter",
         x if x == libc::SYS_io_uring_register => "io_uring_register",
+        x if x == libc::SYS_ptrace => "ptrace",
         x if x == libc::SYS_setpgid => "setpgid",
         x if x == libc::SYS_setsid => "setsid",
         x if x == libc::SYS_setns => "setns",

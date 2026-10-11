@@ -21,3 +21,30 @@ advisory before the details become public.
 
 kekkai has no releases yet. Once it does, only the latest release receives
 security fixes.
+
+## Test suite
+
+Merge CI runs denial tests that spawn `kekkai-probe` through
+`Sandbox::prepare` / `apply`. A case that needs a kernel feature skips with
+an explicit `skip:` message; it never passes when the host cannot enforce
+the rule.
+
+The escape regression suite (`crates/kekkai/tests/escape.rs`) keeps these
+attempts denied:
+
+- a symlink inside the workspace that points outside the allowlist
+- `..` traversal out of the workspace
+- `/proc/self` paths to a file outside the allowlist
+- `ptrace`
+- `io_uring_setup`
+- an inherited extra file descriptor (already-open host fds above stderr
+  are marked `CLOEXEC` in `pre_exec` and do not survive `exec`)
+- connect to an abstract unix socket (skipped below Landlock ABI 6)
+
+`ptrace` is denied by the seccomp filter. Extra descriptors are marked
+`CLOEXEC` after Landlock and seccomp are installed so an inherited host
+fd is not a filesystem bypass.
+
+Fuzz targets in `fuzz/` (not a workspace member) exercise `Settings` and
+path-role handling. An optional GitHub Actions workflow runs them briefly
+on nightly; that job is not a required merge check.

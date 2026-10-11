@@ -34,7 +34,8 @@ Not yet published to crates.io.
   the egress proxy. Filesystem Landlock denials are reported as unavailable
   until the host exposes an unprivileged event stream.
 - **No helper binary, no user namespaces:** rules are installed in
-  `pre_exec`, so it works in unprivileged containers.
+  `pre_exec`, so it works in unprivileged containers. Extra file
+  descriptors above stderr do not survive `exec`; `ptrace` is denied.
 
 Guest isolation (userspace kernel or KVM microVM) is an accepted
 interface, not a shipped adapter: [ADR 0003](docs/decisions/0003-guest-backend-interface.md).

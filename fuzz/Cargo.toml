@@ -1,0 +1,31 @@
+[package]
+name = "kekkai-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kekkai = { path = "../crates/kekkai" }
+tempfile = "3"
+
+[[bin]]
+name = "settings"
+path = "fuzz_targets/settings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "paths"
+path = "fuzz_targets/paths.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(action) = args.next() else {
         eprintln!(
-            "usage: kekkai-probe write|read|env|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect ..."
+            "usage: kekkai-probe write|read|env|socket|write-bytes|mmap-va|touch-bytes|fork-count|ignore-term|term-parent|fill-stdout|fill-stderr|fill-seq-stdout|fill-seq-stderr|connect-tcp|connect-unix|proxy-connect|ptrace|io-uring|read-fd|connect-abstract ..."
         );
         return ExitCode::from(2);
     };
@@ -359,6 +359,128 @@ fn main() -> ExitCode {
             {
                 let _ = (path, host, port);
                 eprintln!("proxy-connect requires Unix");
+                ExitCode::from(2)
+            }
+        }
+        "ptrace" => {
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: probe only; PTRACE_TRACEME is request 0.
+                let rc = unsafe { libc::syscall(libc::SYS_ptrace, 0, 0, 0, 0) };
+                if rc == 0 {
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!("ptrace: {}", std::io::Error::last_os_error());
+                    ExitCode::FAILURE
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("ptrace requires Linux");
+                ExitCode::from(2)
+            }
+        }
+        "io-uring" => {
+            #[cfg(target_os = "linux")]
+            {
+                let mut params = [0u8; 256];
+                // SAFETY: probe only; a denied io_uring_setup must not write params.
+                let rc =
+                    unsafe { libc::syscall(libc::SYS_io_uring_setup, 8usize, params.as_mut_ptr()) };
+                if rc >= 0 {
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!("io-uring: {}", std::io::Error::last_os_error());
+                    ExitCode::FAILURE
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("io-uring requires Linux");
+                ExitCode::from(2)
+            }
+        }
+        "read-fd" => {
+            let Some(fd) = args.next().and_then(|s| s.parse::<i32>().ok()) else {
+                return ExitCode::from(2);
+            };
+            #[cfg(unix)]
+            {
+                use std::io::Write;
+                let mut buf = [0u8; 64];
+                // SAFETY: `fd` is the descriptor the parent asked us to read.
+                let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+                if n > 0 {
+                    let _ = std::io::stdout().write_all(&buf[..n as usize]);
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!("read-fd {fd}: {}", std::io::Error::last_os_error());
+                    ExitCode::FAILURE
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = fd;
+                eprintln!("read-fd requires Unix");
+                ExitCode::from(2)
+            }
+        }
+        "connect-abstract" => {
+            let Some(name) = args.next() else {
+                return ExitCode::from(2);
+            };
+            #[cfg(target_os = "linux")]
+            {
+                let bytes = name.as_bytes();
+                // SAFETY: probe child creating a unix stream socket.
+                let sock = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+                if sock < 0 {
+                    eprintln!(
+                        "connect-abstract socket: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    return ExitCode::FAILURE;
+                }
+                // SAFETY: sockaddr_un is a C struct we fill before connect(2).
+                let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+                addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+                if bytes.len() + 1 >= addr.sun_path.len() {
+                    // SAFETY: `sock` is the descriptor we just created.
+                    unsafe {
+                        libc::close(sock);
+                    }
+                    eprintln!("connect-abstract name too long");
+                    return ExitCode::from(2);
+                }
+                addr.sun_path[0] = 0;
+                for (i, b) in bytes.iter().enumerate() {
+                    addr.sun_path[i + 1] = *b as libc::c_char;
+                }
+                let addr_len = (std::mem::size_of::<libc::sa_family_t>() + 1 + bytes.len()) as u32;
+                // SAFETY: `addr` is a valid abstract unix address of `addr_len` bytes.
+                let rc = unsafe {
+                    libc::connect(
+                        sock,
+                        std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+                        addr_len,
+                    )
+                };
+                let err = std::io::Error::last_os_error();
+                // SAFETY: `sock` is the descriptor we created above.
+                unsafe {
+                    libc::close(sock);
+                }
+                if rc == 0 {
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!("connect-abstract: {err}");
+                    ExitCode::FAILURE
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = name;
+                eprintln!("connect-abstract requires Linux");
                 ExitCode::from(2)
             }
         }

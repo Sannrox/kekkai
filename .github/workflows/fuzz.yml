@@ -1,0 +1,28 @@
+name: Fuzz
+
+on:
+  pull_request:
+  schedule:
+    - cron: "42 4 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: cargo-fuzz (optional)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nightly
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz settings
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: cargo +nightly fuzz run settings -- -max_total_time=20
+      - name: Fuzz paths
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: cargo +nightly fuzz run paths -- -max_total_time=20

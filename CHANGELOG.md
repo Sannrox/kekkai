@@ -55,3 +55,15 @@ sandbox enforces is listed here.
   `health` reports `violations=user_notif|unavailable` and
   `fs_violations=unavailable` (Landlock has no unprivileged denial fd).
   CONNECT denials remain `ViolationKind::Network`.
+- Escape regression suite: symlink, `..`, `/proc/self` paths, `ptrace`,
+  `io_uring`, inherited extra file descriptors, and abstract unix sockets
+  (Landlock ABI 6). cargo-fuzz targets for `Settings` and path handling,
+  with an optional CI job that is not a required merge check.
+
+### Changed
+
+- `linux_native` denies `ptrace` in the seccomp filter.
+- `linux_native` sets `FD_CLOEXEC` on file descriptors above stderr in
+  `pre_exec` after Landlock and seccomp, so an inherited host fd does
+  not survive `exec` and cannot bypass the filesystem allowlist. Pass
+  data on stdin or through an allowed path.

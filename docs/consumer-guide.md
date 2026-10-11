@@ -65,6 +65,11 @@ Under `linux_native`:
 - Rlimits from `Settings.limits` are installed in `pre_exec`.
 - The child is placed in its own process group so timeout and shutdown
   can signal the whole group.
+- File descriptors above stderr are marked `CLOEXEC` in `pre_exec` and
+  do not survive `exec`. Pass data on stdin or through an allowed path,
+  not an inherited fd.
+- `ptrace` is denied, as are `io_uring_setup` / `io_uring_enter` /
+  `io_uring_register`.
 - Denied syscalls are recorded on `ChildUsage.violations` when seccomp
   user notification is available (`health` contains
   `violations=user_notif`, `capabilities.seccomp_user_notif`).
@@ -133,4 +138,6 @@ this job here", not as a cue to switch backends.
 
 Denial tests in `crates/kekkai/tests/` spawn `kekkai-probe` through
 `prepare` / `apply`. On hosts without the kernel feature they skip with
-an explicit `skip:` message; they never pass vacuously.
+an explicit `skip:` message; they never pass vacuously. The escape
+suite (`tests/escape.rs`) and optional fuzz job are described in
+[SECURITY.md](../SECURITY.md).

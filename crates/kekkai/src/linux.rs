@@ -269,6 +269,9 @@ pub(super) fn apply(
                 return Err(io::Error::last_os_error());
             }
             crate::join_cgroup(cgroup_procs_fd)?;
+            // CLOEXEC extras before rlimits: lowering RLIMIT_NOFILE does
+            // not close already-open fds, and the fallback walks 3..cur.
+            close_extra_fds()?;
             crate::apply_rlimit_values(limits)?;
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                 return Err(io::Error::last_os_error());
@@ -278,6 +281,57 @@ pub(super) fn apply(
             }
             install_seccomp(sockets, notif_sock)
         });
+    }
+    Ok(())
+}
+
+/// Mark every descriptor above stderr CLOEXEC. Landlock does not revoke
+/// access through an already-open fd, so inherited host files would bypass
+/// the allowlist after exec. stdin/stdout/stderr stay. Flags are CLOEXEC
+/// rather than a real close so the standard library's exec-error socket
+/// (already CLOEXEC, fd >= 3) remains open until `execve`. Called before
+/// rlimits so a fallback walk of `3..RLIMIT_NOFILE` still sees the host
+/// ceiling, including fds that a later `open_files` cap would not close.
+fn close_extra_fds() -> io::Result<()> {
+    loop {
+        // SAFETY: `close_range` is async-signal-safe. `first=3` keeps 0/1/2.
+        // CLOSE_RANGE_CLOEXEC sets FD_CLOEXEC instead of closing.
+        let rc = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                3u32,
+                u32::MAX,
+                libc::CLOSE_RANGE_CLOEXEC,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EINTR) => continue,
+            Some(libc::ENOSYS | libc::EINVAL) => break,
+            _ => return Err(err),
+        }
+    }
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit is async-signal-safe; we write into stack `lim`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let last = if lim.rlim_cur == libc::RLIM_INFINITY {
+        1_048_576
+    } else {
+        lim.rlim_cur.min(i32::MAX as libc::rlim_t)
+    } as i32;
+    for fd in 3..last {
+        // SAFETY: F_SETFD is async-signal-safe; EBADF on a hole is ignored.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
     }
     Ok(())
 }
@@ -690,9 +744,9 @@ fn socket_filter(sockets: SocketPolicy, deny: u32) -> ([libc::sock_filter; 64], 
         push(&mut filter, &mut i, stmt(BPF_RET | BPF_K, deny));
         push(&mut filter, &mut i, stmt(BPF_LD | BPF_W | BPF_ABS, 0));
     }
-    // Close alternate socket, signal, and identity-change routes. `setpgid`
-    // already ran in this hook; the child must not join the parent group
-    // or stand up io_uring (IORING_OP_SOCKET).
+    // Close alternate socket, signal, identity-change, and debug routes.
+    // `setpgid` already ran in this hook; the child must not join the parent
+    // group, stand up io_uring (IORING_OP_SOCKET), or ptrace the parent.
     for nr in [
         libc::SYS_pidfd_send_signal as u32,
         libc::SYS_rt_sigqueueinfo as u32,
@@ -700,6 +754,7 @@ fn socket_filter(sockets: SocketPolicy, deny: u32) -> ([libc::sock_filter; 64], 
         libc::SYS_io_uring_setup as u32,
         libc::SYS_io_uring_enter as u32,
         libc::SYS_io_uring_register as u32,
+        libc::SYS_ptrace as u32,
         libc::SYS_setpgid as u32,
         libc::SYS_setsid as u32,
         libc::SYS_setns as u32,
