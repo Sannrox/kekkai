@@ -43,6 +43,8 @@ mod linux;
 #[cfg(target_os = "linux")]
 mod notif;
 #[cfg(target_os = "linux")]
+mod ns;
+#[cfg(target_os = "linux")]
 mod proxy;
 
 pub use capture::StreamCapture;
@@ -196,6 +198,20 @@ pub struct CaptureLimits {
     pub keep: CaptureKeep,
 }
 
+/// Process namespace mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Namespaces {
+    /// Share the host namespaces. This is the default.
+    #[default]
+    Off,
+    /// Fresh user, mount, PID, IPC, and UTS namespaces with a private `/proc`.
+    ///
+    /// Requires unprivileged user namespaces. Selection is an error when the
+    /// host cannot create them; there is no silent fallback.
+    Isolate,
+}
+
 /// Unix resource limits applied in the child before exec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Limits {
@@ -249,6 +265,8 @@ pub struct Settings {
     pub cgroup: CgroupLimits,
     /// Delegated cgroup v2 directory. `None` probes the current cgroup.
     pub cgroup_root: Option<PathBuf>,
+    /// Opt-in process namespaces. Requires `rlimit` or `linux_native`.
+    pub namespaces: Namespaces,
 }
 
 impl Settings {
@@ -319,6 +337,12 @@ impl SettingsBuilder {
         self
     }
 
+    /// Opt-in process namespaces.
+    pub fn namespaces(mut self, namespaces: Namespaces) -> Self {
+        self.inner.namespaces = namespaces;
+        self
+    }
+
     /// Finish the builder.
     pub fn build(self) -> Settings {
         self.inner
@@ -351,6 +375,8 @@ pub struct Capabilities {
     pub cgroup: bool,
     /// Seccomp user notification can record denied syscalls in the parent.
     pub seccomp_user_notif: bool,
+    /// Unprivileged user namespaces can be created for isolate mode.
+    pub user_namespaces: bool,
 }
 
 /// Failure to prepare or apply a sandbox.
@@ -446,12 +472,18 @@ pub fn capabilities() -> Capabilities {
     #[cfg(not(target_os = "linux"))]
     let seccomp_user_notif = false;
 
+    #[cfg(target_os = "linux")]
+    let user_namespaces = ns::probe().is_ok();
+    #[cfg(not(target_os = "linux"))]
+    let user_namespaces = false;
+
     Capabilities {
         rlimit,
         landlock_abi,
         seccomp: cfg!(target_os = "linux"),
         cgroup,
         seccomp_user_notif,
+        user_namespaces,
     }
 }
 
@@ -475,7 +507,7 @@ pub fn health(settings: &Settings) -> Health {
         }
         Backend::LinuxNative => linux_native_health(settings),
     };
-    match (&backend, cgroup_health(settings)) {
+    let with_cgroup = match (&backend, cgroup_health(settings)) {
         (_, Some(Health::Error(message))) => Health::Error(message),
         (Health::Error(_), _) => backend,
         (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
@@ -483,6 +515,39 @@ pub fn health(settings: &Settings) -> Health {
             Health::Warning(format!("{base}; {extra}"))
         }
         _ => backend,
+    };
+    match (&with_cgroup, namespace_health(settings)) {
+        (_, Some(Health::Error(message))) => Health::Error(message),
+        (Health::Error(_), _) => with_cgroup,
+        (Health::Ok(base), Some(Health::Ok(extra))) => Health::Ok(format!("{base}; {extra}")),
+        (Health::Warning(base), Some(Health::Ok(extra))) => {
+            Health::Warning(format!("{base}; {extra}"))
+        }
+        _ => with_cgroup,
+    }
+}
+
+fn namespace_health(settings: &Settings) -> Option<Health> {
+    if matches!(settings.namespaces, Namespaces::Off) {
+        return None;
+    }
+    if matches!(settings.backend, Backend::None) {
+        return Some(Health::Error(
+            "namespace isolate requires backend rlimit or linux_native".into(),
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(match ns::probe() {
+            Ok(()) => Health::Ok("namespaces=isolate pid+mount+ipc+uts".into()),
+            Err(error) => Health::Error(error.to_string()),
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some(Health::Error(
+            "namespace isolate is supported only on Linux".into(),
+        ))
     }
 }
 
@@ -656,6 +721,7 @@ impl Sandbox {
 
         let limits = rlimit_values(&self.settings);
         let cgroup_fd = self.cgroup_procs_fd();
+        let isolate = matches!(self.settings.namespaces, Namespaces::Isolate);
         // SAFETY: `pre_exec` runs between fork and exec. The closure only
         // performs async-signal-safe libc calls and does not allocate.
         unsafe {
@@ -664,6 +730,12 @@ impl Sandbox {
                     return Err(io::Error::last_os_error());
                 }
                 join_cgroup(cgroup_fd)?;
+                #[cfg(target_os = "linux")]
+                if isolate {
+                    ns::enter()?;
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = isolate;
                 apply_rlimit_values(limits)
             });
         }
@@ -718,6 +790,7 @@ impl Sandbox {
             self.cgroup_procs_fd(),
             prepared,
             notif_sock,
+            matches!(self.settings.namespaces, Namespaces::Isolate),
         )
     }
 
@@ -1129,6 +1202,13 @@ fn validate(settings: &Settings) -> Result<(), Error> {
             "cgroup limits require backend rlimit or linux_native",
         ));
     }
+    if matches!(settings.namespaces, Namespaces::Isolate)
+        && matches!(settings.backend, Backend::None)
+    {
+        return Err(Error::invalid(
+            "namespace isolate requires backend rlimit or linux_native",
+        ));
+    }
     match &settings.network {
         Network::Allowlist(hosts) => {
             if !matches!(settings.backend, Backend::LinuxNative) {
@@ -1354,6 +1434,16 @@ mod tests {
     }
 
     #[test]
+    fn isolate_namespaces_without_a_real_backend_are_invalid() {
+        let settings = Settings {
+            namespaces: Namespaces::Isolate,
+            ..Settings::default()
+        };
+        let error = Sandbox::prepare(&settings, ".").unwrap_err();
+        assert!(error.to_string().contains("namespace"), "{error}");
+    }
+
+    #[test]
     fn extra_roots_require_linux_native() {
         let mut settings = Settings::default();
         settings.readable_roots.push("/usr".into());
@@ -1529,6 +1619,7 @@ mod tests {
             assert_eq!(caps.landlock_abi, None);
             assert!(!caps.cgroup);
             assert!(!caps.seccomp_user_notif);
+            assert!(!caps.user_namespaces);
         }
     }
 

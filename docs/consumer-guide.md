@@ -92,6 +92,12 @@ waits `term_grace`, then `SIGKILL`s the process group and writes
 stdout and stderr under per-stream byte caps (head, tail, or both).
 Overflow is drained so the child cannot fill the pipe.
 
+`Namespaces::Isolate` (opt-in on `rlimit` or `linux_native`) creates
+user, mount, PID, IPC, and UTS namespaces and remounts `/proc`. The
+child is PID 1 and does not see host processes or host IPC objects.
+The host must allow unprivileged user namespaces; otherwise `health`
+is an error and `prepare` returns `Error::Unavailable`.
+
 `pre_exec` code is async-signal-safe: no allocation, locks, or logging.
 
 ## What is not enforced
@@ -103,8 +109,8 @@ Overflow is drained so the child cannot fill the pipe.
 - Real isolation on non-Linux hosts. `linux_native` is unsupported there;
   `rlimit` still applies Unix resource limits.
 - A guest adapter. ADR 0003 is the interface only.
-- Syscall allowlists beyond the socket gate, mount/PID/IPC/UTS namespaces,
-  and filesystem views (bind, tmpfs, overlay). Those are later work.
+- Syscall allowlists beyond the socket gate, and filesystem views
+  (bind, tmpfs, overlay). Those are later work.
 
 ## Recommended settings
 

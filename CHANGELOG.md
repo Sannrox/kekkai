@@ -64,6 +64,9 @@ sandbox enforces is listed here.
   structs, `#![deny(missing_docs)]`, and `rust-version = "1.97.1"`. Adding
   a field to `Settings` is not a breaking change for builder callers.
   Enforcement changes stay versioned; they are never a patch-level surprise.
+- Opt-in `Namespaces::Isolate`: user, mount, PID, IPC, and UTS namespaces
+  with a private `/proc`. Requires unprivileged user namespaces. Missing
+  support is `Error::Unavailable`; there is no silent fallback.
 
 ### Changed
 
