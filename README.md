@@ -39,7 +39,9 @@ Not yet published to crates.io.
   `userspace` (opt-in `guest` cargo feature). Selecting a backend the
   kernel cannot provide is an error, never a silent downgrade.
 - **Host detection:** `health` and `capabilities` report which backends the
-  running kernel supports. `ChildUsage.violations` records seccomp-denied
+  running kernel supports. `Host::probe` snapshots that once;
+  `Sandbox::prepare_with_host` reuses the snapshot so a runner does not
+  re-probe between jobs. A stale snapshot fails closed. `ChildUsage.violations` records seccomp-denied
   syscalls when user notification is available, and CONNECT denials from
   the egress proxy. Filesystem Landlock denials are reported as unavailable
   until the host exposes an unprivileged event stream.

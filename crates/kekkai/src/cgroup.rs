@@ -86,6 +86,7 @@ pub(super) fn probe_with(
     root: Option<&Path>,
     limits: &CgroupLimits,
 ) -> Result<PathBuf, Error> {
+    crate::probe_stats::inc_cgroup();
     let mount = cgroup2_mount()
         .ok_or_else(|| Error::unavailable(backend, "cgroup v2 is not mounted on this host"))?;
     let parent = match root {
@@ -148,8 +149,15 @@ pub(super) fn prepare(
     backend: Backend,
     limits: &CgroupLimits,
     root: Option<&Path>,
+    cached_parent: Option<&Path>,
 ) -> Result<CgroupPrepared, Error> {
-    let parent = probe_with(backend, root, limits)?;
+    let parent = match cached_parent {
+        Some(path) => {
+            cached_parent_supports(backend, path, limits)?;
+            path.to_path_buf()
+        }
+        None => probe_with(backend, root, limits)?,
+    };
     let dir = parent.join(format!("kekkai-{}-{}", std::process::id(), nanos()));
     fs::create_dir(&dir).map_err(|error| {
         Error::unavailable(
@@ -187,6 +195,43 @@ fn apply_limits(backend: Backend, dir: &Path, limits: &CgroupLimits) -> Result<(
     }
     if let Some(io) = limits.io_max {
         write_controller(backend, dir.join("io.max"), format_io_max(io), "io")?;
+    }
+    Ok(())
+}
+
+/// Read-only check that `parent` can delegate the requested controllers.
+/// Used when a [`crate::Host`] snapshot already proved the subtree exists.
+pub(super) fn cached_parent_supports(
+    backend: Backend,
+    parent: &Path,
+    limits: &CgroupLimits,
+) -> Result<(), Error> {
+    if !parent.join("cgroup.controllers").is_file() {
+        return Err(Error::unavailable(
+            backend,
+            format!(
+                "cgroup_root `{}` is not a cgroup v2 directory",
+                parent.display()
+            ),
+        ));
+    }
+    let subtree = fs::read_to_string(parent.join("cgroup.subtree_control")).unwrap_or_default();
+    let has = |name: &str| {
+        subtree
+            .split_whitespace()
+            .any(|controller| controller == name)
+    };
+    if (limits.cpu_weight.is_some() || limits.cpu_quota_us.is_some()) && !has("cpu") {
+        return Err(Error::unavailable(
+            backend,
+            "cgroup cpu controller unavailable",
+        ));
+    }
+    if limits.io_max.is_some() && !has("io") {
+        return Err(Error::unavailable(
+            backend,
+            "cgroup io controller unavailable",
+        ));
     }
     Ok(())
 }
@@ -401,6 +446,39 @@ mod tests {
             require_requested_controllers(Backend::Rlimit, dir.path(), &limits).unwrap_err();
         assert!(matches!(error, Error::Unavailable { .. }), "{error}");
         assert!(error.to_string().contains("cpu"), "{error}");
+    }
+
+    #[test]
+    fn cached_parent_rejects_missing_cpu_in_subtree_control() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("cgroup.controllers"), b"memory pids\n").unwrap();
+        fs::write(dir.path().join("cgroup.subtree_control"), b"memory pids\n").unwrap();
+        let limits = CgroupLimits {
+            cpu_quota_us: Some(10_000),
+            ..CgroupLimits::default()
+        };
+        let error = cached_parent_supports(Backend::Rlimit, dir.path(), &limits).unwrap_err();
+        assert!(matches!(error, Error::Unavailable { .. }), "{error}");
+        assert!(error.to_string().contains("cpu"), "{error}");
+    }
+
+    #[test]
+    fn cached_parent_rejects_missing_io_in_subtree_control() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("cgroup.controllers"), b"memory pids\n").unwrap();
+        fs::write(dir.path().join("cgroup.subtree_control"), b"memory pids\n").unwrap();
+        let limits = CgroupLimits {
+            io_max: Some(IoMax {
+                major: 8,
+                minor: 0,
+                rbps: Some(1),
+                ..IoMax::default()
+            }),
+            ..CgroupLimits::default()
+        };
+        let error = cached_parent_supports(Backend::Rlimit, dir.path(), &limits).unwrap_err();
+        assert!(matches!(error, Error::Unavailable { .. }), "{error}");
+        assert!(error.to_string().contains("io"), "{error}");
     }
 
     #[test]

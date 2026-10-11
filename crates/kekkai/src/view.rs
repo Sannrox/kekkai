@@ -74,6 +74,7 @@ struct Bind {
 
 /// Probe overlay + tmpfs + pivot inside an isolate namespace.
 pub(super) fn probe() -> Result<(), Error> {
+    crate::probe_stats::inc_view();
     if crate::ns::probe().is_err() {
         return Err(Error::unavailable(
             Backend::LinuxNative,

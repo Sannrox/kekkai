@@ -9,6 +9,13 @@ sandbox enforces is listed here.
 
 ### Added
 
+- `Host` snapshot: `Host::probe` records kernel capabilities once;
+  `Sandbox::prepare_with_host` reuses it and skips cgroup probe writes and
+  namespace / Landlock / view child probes. `Host::refresh` repeats the
+  probes. A stale snapshot fails prepare or apply; it never weakens
+  isolation. `Sandbox::prepare` still probes on each call. Overhead bench
+  scenario `linux_native_cached_host` measures the reused path (same ≥ 50
+  sequential jobs/s budget as `linux_native`).
 - `kekkai run` CLI: flags or a JSON settings file in, `Sandbox::prepare` /
   `spawn` of a real command out. The child inherits stdio. After it
   exits, a JSON `RunReport` (`schema_version` 1) is written to stderr
