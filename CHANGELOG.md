@@ -25,3 +25,7 @@ sandbox enforces is listed here.
 - ADR 0002: provide a reusable process sandbox library.
 - ADR 0003: guest backend interface for per-run isolation (userspace
   kernel or KVM microVM). The crate does not ship an adapter yet.
+- `Sandbox::spawn_with_deadline` (and `spawn_with_deadline_tokio`):
+  wall-clock `SIGTERM`, then `SIGKILL` of the process group and
+  `cgroup.kill`. `ChildUsage.timed_out` is set only when the deadline
+  expires.
