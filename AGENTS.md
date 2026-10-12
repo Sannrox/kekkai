@@ -52,17 +52,81 @@ bash scripts/validate-workflow-skills.sh
 
 - `cargo fmt --all` formats before review.
 - `cargo clippy ... -D warnings` is required for ship-level local gates.
-- `scripts/validate-workflow-skills.sh` checks that the delivery Skills and
-  this file stay linked.
+- `scripts/validate-workflow-skills.sh` clones or updates agent-kit and checks
+  that the skill stubs, vendored scripts and this file (including
+  `## Agent skill profile`)
+  match it.
 
 There is no Makefile yet. When one is added, its targets become the source of
 truth for these commands and this section must point to them.
 
-GitHub Issues are the planning source of truth. Project-specific Skills live
-under `.agents/skills/`. Read `README.md` and accepted ADRs under
+GitHub Issues are the planning source of truth. Skills live under `.agents/skills/`
+(see Shared agent skills below). Read `README.md` and accepted ADRs under
 `docs/decisions/` before changing system boundaries; record new boundaries,
 trust-model changes, and public contracts as ADRs with the
 `capture-project-decision` Skill.
+
+## Shared agent skills
+
+The workflow Skills (`advance-issue-frontier`, `assess-change-impact`,
+`capture-project-decision`, `deliver-ready-issue`, `prepare-release`,
+`refactor-docs`, `shape-work-item`, `technical-documentation`, `verify-change`)
+are canonical in [Sannrox/agent-kit](https://github.com/Sannrox/agent-kit).
+There is no pin: this repository always uses the latest `main`.
+`.agents/skills/<name>/` holds only a generated stub that points to the shared
+skill; read the installed skill under `~/.agents/agent-kit/` (or
+`$AGENT_KIT_HOME`). Run `bash scripts/validate-workflow-skills.sh` to clone or
+update it.
+
+- Repository-specific facts the shared Skills need come from this file: the
+  ownership, structure, parallel-lane and testing sections, plus
+  `## Agent skill profile` below for anything they do not already say. Edit
+  this file, not the stubs.
+- Never edit stubs or vendored `scripts/gh-verified-push.sh` and
+  `scripts/validate-workflow-skills.sh` here; change them upstream in
+  agent-kit, then run `bash scripts/validate-workflow-skills.sh --render` here
+  when CI reports drift.
+- Repository-only Skills live next to the stubs as full folders and stay local.
+
+## Agent skill profile
+
+Facts the shared agent-kit skills read that the sections above do not already
+state.
+
+Feature: a new observable operator or integration outcome.
+
+### Compatibility and failure obligations
+
+The SemVer class of every change, consumers that must bump their pin, hosts
+whose kernel lacks a feature, and behavior parity with code ported from
+another project.
+
+### Additional impact boundaries
+
+- backend selection and host detection: an unavailable backend is an error,
+  never a silent downgrade;
+- `pre_exec` safety between fork and exec;
+- public API and SemVer: settings types, prepare/apply, health report;
+- known users pinning a version must be able to upgrade.
+
+### Verification matrix
+
+Rows beyond `## Testing Guidelines`:
+
+| Surface | Required evidence |
+| --- | --- |
+| `pre_exec` code | review for async-signal safety (no allocation, locks, logging); `// SAFETY:` on every `unsafe` |
+| backend selection / host detection | unsupported backend is an error, not a downgrade; health output covered by tests |
+| public API | SemVer impact stated; docs updated; impact on known users named |
+
+### Release audit
+
+- workspace version, lockfile, and the git tag consumers pin;
+- SemVer class: any change to what is allowed or denied, backend selection, or
+  health reporting is at least a minor change before `1.0` and is called out;
+- impact on known users and the upgrade each needs;
+- supported kernels and behavior when a feature is missing;
+- security notes for any enforcement fix.
 
 ## Agent delivery closeout (required)
 
@@ -134,7 +198,7 @@ confirmation, unless the lead of the same parallel run owns the stalled lane.
 
 A lane claims before it implements, under Publish or Land authority or with an
 explicit claim authorization under Implement, using
-`bash .agents/skills/deliver-ready-issue/scripts/issue-lane.sh claim <issue>`:
+`bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}"/skills/deliver-ready-issue/scripts/issue-lane.sh claim <issue>`:
 
 - the branch `<type>/<issue>` is created on GitHub from the default branch by
   an atomic ref creation, so when two machines race exactly one claim
@@ -204,21 +268,8 @@ The lead of a parallel run keeps a ledger per lane: Issue, branch, base SHA,
 owner, state, Pull Request, evidence, blockers, and cleanup. Keep hostnames
 and absolute checkout paths in the session with the maintainer, never on
 GitHub. Report verified outcomes, not launched work. The executable lead
-procedure is `.agents/skills/deliver-ready-issue/references/parallel-delivery.md`.
-
-## Ontology Policy
-
-For work involving portable ontology definitions, classes, relations,
-provenance, validation, import, export, or structural queries, always use the
-project-local `sekai-ontology` Skill in `.agents/skills/sekai-ontology/`.
-
-Select the ontology database explicitly with `--db <path>` or `SEKAI_DB` when
-the resolved default is not the intended file, then run `sekai --json validate`
-before relying on its contents. Treat successful ontology output as structured
-repository evidence, preserve its provenance in answers, and state when
-validation fails or the requested fact is absent rather than inferring it. Do
-not use a sandbox scratch tree or a control-plane database as a portable
-ontology database.
+procedure is `skills/deliver-ready-issue/references/parallel-delivery.md` in
+agent-kit.
 
 ## Coding Style & Naming Conventions
 
