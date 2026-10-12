@@ -7,6 +7,14 @@ sandbox enforces is listed here.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-12
+
+First tagged release. Pin git tag `v0.1.0`. The crate is not on crates.io
+(`publish = false`). Selecting a backend the host cannot provide is an
+error; there is no silent downgrade. Linux isolation needs Landlock ABI 3
+(ABI 6 for `Network::Allowlist` and abstract unix). macOS uses
+`Backend::Macos`. Other platforms use `rlimit` or `none`.
+
 ### Added
 
 - `Host` snapshot: `Host::probe` records kernel capabilities once;
@@ -149,3 +157,6 @@ sandbox enforces is listed here.
   `pre_exec` after Landlock and seccomp, so an inherited host fd does
   not survive `exec` and cannot bypass the filesystem allowlist. Pass
   data on stdin or through an allowed path.
+
+[Unreleased]: https://github.com/Sannrox/kekkai/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Sannrox/kekkai/releases/tag/v0.1.0
