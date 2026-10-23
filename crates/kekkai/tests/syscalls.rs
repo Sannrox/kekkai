@@ -257,7 +257,7 @@ fn python_duckdb_runs_under_python_profile() {
     let mut cmd = Command::new(&python);
     cmd.args([
         "-c",
-        "import duckdb; print(duckdb.sql('select 1').fetchone()[0])",
+        "import duckdb; print(duckdb.sql('select 1').limit(1).fetchall()[0][0])",
     ]);
     let output = run(&sandbox, cmd);
     assert!(
