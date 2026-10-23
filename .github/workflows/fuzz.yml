@@ -19,9 +19,9 @@ jobs:
     name: cargo-fuzz (optional)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install nightly
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04 # nightly
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz --locked
       - name: Fuzz settings
