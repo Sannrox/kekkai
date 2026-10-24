@@ -47,6 +47,9 @@ cargo build --locked --workspace --all-targets
 cargo build --locked --workspace --examples
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
+cargo test --locked --workspace --features tokio
+cargo test --locked --workspace --features tracing
+cargo test --locked --workspace --features guest
 bash scripts/validate-workflow-skills.sh
 ```
 

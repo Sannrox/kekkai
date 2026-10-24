@@ -19,8 +19,8 @@ advisory before the details become public.
 
 ## Supported versions
 
-kekkai has no releases yet. Once it does, only the latest release receives
-security fixes.
+Only the latest release receives security fixes. The current release is
+`v0.1.0`.
 
 ## Test suite
 
