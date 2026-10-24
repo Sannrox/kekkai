@@ -18,7 +18,7 @@ pub struct StreamCapture {
     pub dropped: u64,
 }
 
-pub fn drain(mut reader: impl Read, max: usize, keep: CaptureKeep) -> StreamCapture {
+fn drain(mut reader: impl Read, max: usize, keep: CaptureKeep) -> StreamCapture {
     match keep {
         CaptureKeep::Head => drain_head(&mut reader, max),
         CaptureKeep::Tail => drain_tail(&mut reader, max),
@@ -140,7 +140,7 @@ fn drain_head_and_tail_one_pass(reader: &mut impl Read, max: usize) -> StreamCap
     }
 }
 
-pub fn spawn_drain<R: Read + Send + 'static>(
+pub(crate) fn spawn_drain<R: Read + Send + 'static>(
     reader: Option<R>,
     max: Option<usize>,
     keep: CaptureKeep,
@@ -152,7 +152,7 @@ pub fn spawn_drain<R: Read + Send + 'static>(
     Some(thread::spawn(move || drain(reader, max, keep)))
 }
 
-pub fn join_drain(handle: Option<thread::JoinHandle<StreamCapture>>) -> StreamCapture {
+pub(crate) fn join_drain(handle: Option<thread::JoinHandle<StreamCapture>>) -> StreamCapture {
     match handle {
         Some(handle) => handle.join().unwrap_or_default(),
         None => StreamCapture::default(),
