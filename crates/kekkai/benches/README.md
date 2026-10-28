@@ -5,7 +5,10 @@
 
 The Linux x86_64 runner stores percentiles in
 `baseline-linux-x86_64.json`. The scheduled Bench workflow fails when a
-measured p95 is more than 20% above that baseline. Scenarios the host
+sandboxed scenario's p95, as a multiple of the unsandboxed p95 from the
+same run, is more than 20% above that multiple in the baseline. The
+unsandboxed scenario runs no kekkai code: it is the reference, so a slow
+shared runner does not fail the check on its own. Scenarios the host
 cannot enforce print `skip:` and are left out of the comparison.
 
 Published budgets (enforced when the scenario ran):

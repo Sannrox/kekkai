@@ -2,6 +2,8 @@
 //!
 //! Run with `cargo bench --bench overhead`. Compare a Linux runner against a
 //! stored baseline with `--check crates/kekkai/benches/baseline-linux-x86_64.json`.
+//! The check compares each sandboxed scenario's p95 relative to the same run's
+//! unsandboxed spawn, so runner speed cancels out (#64).
 //! Scenarios the host cannot enforce print `skip:` and are omitted from the
 //! report. They never count as a passing measurement.
 
@@ -511,6 +513,10 @@ fn check_budgets(report: &Report) -> Result<(), String> {
     Ok(())
 }
 
+/// Fails when a sandboxed scenario's p95, as a multiple of the same run's
+/// unsandboxed p95, is more than 20% above that multiple in the baseline.
+/// The unsandboxed scenario runs no kekkai code, so it is the reference and
+/// is not checked on its own: on a shared runner its absolute p95 is noise.
 fn check_baseline(path: &Path, report: &Report) -> Result<(), String> {
     let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let baseline: Report =
@@ -521,15 +527,29 @@ fn check_baseline(path: &Path, report: &Report) -> Result<(), String> {
             baseline.schema_version
         ));
     }
+    let reference = |report: &Report, label: &str| {
+        find(report, "unsandboxed")
+            .filter(|row| row.p95_ns > 0)
+            .map(|row| row.p95_ns as f64)
+            .ok_or_else(|| format!("{label} unsandboxed scenario missing"))
+    };
+    let baseline_reference = reference(&baseline, "baseline")?;
+    let current_reference = reference(report, "current")?;
     for previous in &baseline.scenarios {
+        if previous.name == "unsandboxed" {
+            continue;
+        }
         let Some(current) = find(report, &previous.name) else {
             continue;
         };
-        let limit = (previous.p95_ns as f64 * REGRESSION) as u64;
-        if current.p95_ns > limit {
+        let allowed = previous.p95_ns as f64 / baseline_reference * REGRESSION;
+        let measured = current.p95_ns as f64 / current_reference;
+        if measured > allowed {
             return Err(format!(
-                "{} p95 {}ns exceeds 20% of baseline {}ns (limit {limit}ns)",
-                previous.name, current.p95_ns, previous.p95_ns
+                "{} p95 is {measured:.2}x unsandboxed, more than 20% above the baseline {:.2}x \
+                 (limit {allowed:.2}x)",
+                previous.name,
+                allowed / REGRESSION
             ));
         }
     }
