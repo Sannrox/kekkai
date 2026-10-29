@@ -85,10 +85,10 @@ update it.
   ownership, structure, parallel-lane and testing sections, plus
   `## Agent skill profile` below for anything they do not already say. Edit
   this file, not the stubs.
-- Never edit stubs or vendored `scripts/gh-verified-push.sh` and
-  `scripts/validate-workflow-skills.sh` here; change them upstream in
-  agent-kit, then run `bash scripts/validate-workflow-skills.sh --render` here
-  when CI reports drift.
+- Never edit stubs or the vendored `scripts/validate-workflow-skills.sh` here;
+  change them upstream in agent-kit, then run
+  `bash scripts/validate-workflow-skills.sh --render` here when CI reports
+  drift.
 - Repository-only Skills live next to the stubs as full folders and stay local.
 
 ## Agent skill profile
@@ -262,10 +262,13 @@ ancestor of its head; it refreshes onto `main` only for a conflict, a failing
 gate, an explicit request, or a sibling landing on a shared surface, not
 merely because `main` advanced.
 
-Landing is sequential. After each merge, fetch, recompute the frontier, and let
-the remaining lanes recheck `mergeable` against the new `main`. A failed or
-timed-out merge response may still have merged; reconcile the remote state
-before retrying.
+Lanes publish with `issue-lane.sh push <issue>` and land with
+`issue-lane.sh land <issue> --pr <pr>` (see `### Verified commits on GitHub`).
+`land` merges only the reviewed head once its checks pass and reconciles an
+uncertain merge response from the Pull Request state, so it is safe to rerun;
+a lane that conflicts with a sibling's landing stops instead of merging. After
+each merge, fetch, recompute the frontier, and let the remaining lanes recheck
+`mergeable` against the new `main`.
 
 The lead of a parallel run keeps a ledger per lane: Issue, branch, base SHA,
 owner, state, Pull Request, evidence, blockers, and cleanup. Keep hostnames
@@ -320,30 +323,26 @@ than an environment name, a digest, or a hold).
 
 ### Verified commits on GitHub
 
-Prefer publishing PR branch tips with GitHub-signed commits so GitHub shows
-**Verified**:
+Publish and land lanes through the shared agent-kit lane tool so GitHub shows
+**Verified** commits and `main` stays linear:
 
-1. Implement and commit locally as usual (`commit.gpgsign` may still apply).
-2. Publish the branch tip with `bash scripts/gh-verified-push.sh` instead of a
-   plain `git push` when you want the hosted commit Verified (GraphQL
-   `createCommitOnBranch`). That path creates one server-side commit with the
-   local `HEAD` tree; committer is typically **GitHub**.
-3. New branch:
-   `bash scripts/gh-verified-push.sh --create-branch-from origin/main --branch <topic> --sync-local`
-4. Existing PR branch:
-   `bash scripts/gh-verified-push.sh --branch <topic> --sync-local`
-   (uses the current remote tip as `expectedHeadOid`).
-5. Never pass `--no-gpg-sign` for local commits; if GPG fails, stop and fix it.
-6. After publish, confirm `verification.verified=true` (the script prints this).
+1. Implement and commit locally as usual. Never pass `--no-gpg-sign`; if GPG
+   fails, stop and fix it.
+2. Publish the claim branch from the lane worktree:
+   `bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}"/skills/deliver-ready-issue/scripts/issue-lane.sh push <issue>`.
+   It creates GitHub-signed commits and resets the worktree to the published
+   commit, so local `HEAD` is the Pull Request head. Confirm it reports
+   `verification.verified=true`.
+3. Land with `bash "${AGENT_KIT_HOME:-$HOME/.agents/agent-kit}"/skills/deliver-ready-issue/scripts/issue-lane.sh land <issue> --pr <pr>`.
+   It squash-merges the reviewed head once the required checks pass, and
+   deletes the claim branch only after the merge and the closed Issue are
+   confirmed.
 
-When merging PRs, prefer **squash** (`gh pr merge --squash --delete-branch`) so
-the land commit on `main` is also GitHub-signed/Verified and history stays
-linear. Use `gh pr merge --merge` only when multi-commit history must be kept
-(original SHAs preserved). Avoid GitHub **rebase** merges when Verified history
-matters: rebase-merge rewrites commits and drops signatures. Do not rewrite
-protected `main` after merging unless the user explicitly approves; if
-protection is temporarily relaxed, restore force-push and status-check settings
-immediately after the correction.
+Do not queue GitHub auto-merge, and do not use GitHub **rebase** merges:
+rebase-merge rewrites commits and drops signatures. Do not rewrite protected
+`main` after merging unless the user explicitly approves; if protection is
+temporarily relaxed, restore force-push and status-check settings immediately
+after the correction.
 
 ## Security & Configuration Tips
 
