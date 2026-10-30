@@ -152,6 +152,12 @@ Denial tests spawn a real child through `Sandbox::prepare` / `apply`. On
 hosts without Landlock or seccomp they skip with an explicit `skip:`
 message.
 
+## Releasing
+
+Tagged releases follow the family policy in
+[tenkai ADR 0040](https://github.com/Sannrox/tenkai/blob/main/docs/decisions/0040-family-versioning-and-release-policy.md).
+Maintainer steps for this repository: [RELEASING.md](RELEASING.md).
+
 ## Security
 
 Report sandbox escapes privately; see [SECURITY.md](SECURITY.md).
