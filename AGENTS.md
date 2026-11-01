@@ -313,7 +313,10 @@ summary, **tests run**, **autoreview result** (for non-trivial code), linked
 issue or context, and any configuration, compatibility, or security
 implications. `.agents/skills/` is tracked; do not treat it as gitignored.
 Record every user-visible and enforcement change in `CHANGELOG.md` under
-`Unreleased` (ADR 0002).
+`Unreleased` (ADR 0002). The CI `Semver` job runs `cargo-semver-checks` against the pull
+request base; a reported major break passes only with a `type!:` title or a
+`## Breaking` section in the body, the `risk:breaking` label, and the
+matching `Unreleased` entry.
 
 ### Public hygiene
 
