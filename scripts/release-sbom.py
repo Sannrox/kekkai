@@ -18,6 +18,14 @@ def cargo_metadata(root: Path) -> dict:
     return json.loads(raw)
 
 
+# Cargo license strings are SPDX expressions (or the legacy "/" form), not
+# single SPDX ids, so they go in CycloneDX's free-form `expression`; a
+# compound value under `license.id` makes the document invalid, and the
+# attestation action rejects it.
+def license_entry(raw: str) -> dict:
+    return {"expression": " OR ".join(part.strip() for part in raw.split("/"))}
+
+
 def bom_from_metadata(meta: dict) -> dict:
     workspace = set(meta.get("workspace_members") or [])
     packages = meta.get("packages") or []
@@ -38,7 +46,7 @@ def bom_from_metadata(meta: dict) -> dict:
             "purl": purl,
         }
         if pkg.get("license"):
-            component["licenses"] = [{"license": {"id": pkg["license"]}}]
+            component["licenses"] = [license_entry(pkg["license"])]
         if pid not in workspace:
             components.append(component)
     if root_pkg is None:
@@ -79,10 +87,24 @@ def self_test() -> None:
             },
         ],
     }
+    meta["packages"].append(
+        {
+            "id": "memchr 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+            "name": "memchr",
+            "version": "2.0.0",
+            "license": "MIT/Unlicense",
+        }
+    )
     bom = bom_from_metadata(meta)
     assert bom["bomFormat"] == "CycloneDX"
     assert bom["metadata"]["component"]["version"] == "0.1.0"
-    assert bom["components"][0]["name"] == "libc"
+    by_name = {component["name"]: component for component in bom["components"]}
+    assert by_name["libc"]["licenses"] == [{"expression": "MIT OR Apache-2.0"}]
+    assert by_name["memchr"]["licenses"] == [{"expression": "MIT OR Unlicense"}]
+    # No license entry may carry a compound value as a single SPDX id.
+    for component in bom["components"]:
+        for entry in component.get("licenses", []):
+            assert "license" not in entry, entry
     print("release-sbom self-test passed")
 
 
