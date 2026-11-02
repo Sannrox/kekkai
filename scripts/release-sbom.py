@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -52,7 +53,7 @@ def bom_from_metadata(meta: dict) -> dict:
     if root_pkg is None:
         raise SystemExit("cargo metadata did not include workspace package kekkai")
     root_purl = f"pkg:cargo/kekkai@{root_pkg['version']}"
-    return {
+    bom = {
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
         "version": 1,
@@ -67,6 +68,11 @@ def bom_from_metadata(meta: dict) -> dict:
         },
         "components": sorted(components, key=lambda item: item["bom-ref"]),
     }
+
+    # Stable contents produce the same document identity on a rebuild.
+    document = json.dumps(bom, sort_keys=True, separators=(",", ":"))
+    bom["serialNumber"] = uuid.uuid5(uuid.NAMESPACE_URL, document).urn
+    return bom
 
 
 def self_test() -> None:
@@ -97,6 +103,8 @@ def self_test() -> None:
     )
     bom = bom_from_metadata(meta)
     assert bom["bomFormat"] == "CycloneDX"
+    assert bom["serialNumber"].startswith("urn:uuid:")
+    uuid.UUID(bom["serialNumber"].removeprefix("urn:uuid:"))
     assert bom["metadata"]["component"]["version"] == "0.1.0"
     by_name = {component["name"]: component for component in bom["components"]}
     assert by_name["libc"]["licenses"] == [{"expression": "MIT OR Apache-2.0"}]
