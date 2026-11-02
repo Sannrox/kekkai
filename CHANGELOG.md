@@ -11,13 +11,23 @@ sandbox enforces is listed here.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-02
+
+Prepared for the signed-tag release workflow. Pin `v0.2.2` after publication
+and verify it with `git verify-tag v0.2.2` and `gh release verify v0.2.2`.
+Sandbox enforcement and the public API are unchanged from 0.2.1.
+
+### Fixed
+
+- The release SBOM includes a document serial number so attestation format
+  detection accepts it (#80).
+
 ## [0.2.1] - 2026-11-02
 
-First release published by the signed-tag release workflow. Pin git tag
-`v0.2.1`. The release carries an SBOM, build provenance attestations, and a
-signed family release manifest; verify it with `git verify-tag v0.2.1` and
-`gh release verify v0.2.1`. What the sandbox enforces is unchanged from
-0.1.0.
+Signed tag `v0.2.1` only: packaging and build provenance succeeded, but SBOM
+attestation failed because the document serial number was missing (#80).
+No GitHub Release was published. Use `v0.2.2` after publication. Sandbox
+enforcement is unchanged from 0.1.0.
 
 ### Fixed
 
@@ -28,8 +38,8 @@ signed family release manifest; verify it with `git verify-tag v0.2.1` and
 ## [0.2.0] - 2026-11-02
 
 Signed tag `v0.2.0` only: its release workflow failed at attestation (#76),
-so no GitHub Release, SBOM attestation or provenance exists for it. Pin
-`v0.2.1` instead. What the sandbox enforces is unchanged from 0.1.0.
+so no GitHub Release or SBOM attestation exists for it. Use
+`v0.2.2` after publication. What the sandbox enforces is unchanged from 0.1.0.
 
 ### Changed
 
@@ -199,7 +209,8 @@ error; there is no silent downgrade. Linux isolation needs Landlock ABI 3
   not survive `exec` and cannot bypass the filesystem allowlist. Pass
   data on stdin or through an allowed path.
 
-[Unreleased]: https://github.com/Sannrox/kekkai/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Sannrox/kekkai/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/Sannrox/kekkai/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/Sannrox/kekkai/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Sannrox/kekkai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Sannrox/kekkai/releases/tag/v0.1.0
