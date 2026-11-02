@@ -11,13 +11,25 @@ sandbox enforces is listed here.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-02
+
+First release published by the signed-tag release workflow. Pin git tag
+`v0.2.1`. The release carries an SBOM, build provenance attestations, and a
+signed family release manifest; verify it with `git verify-tag v0.2.1` and
+`gh release verify v0.2.1`. What the sandbox enforces is unchanged from
+0.1.0.
+
+### Fixed
+
+- The release SBOM writes crate licenses as SPDX expressions; compound
+  values under `license.id` made it invalid, and the `v0.2.0` workflow
+  failed to attest it (#76).
+
 ## [0.2.0] - 2026-11-02
 
-First release cut by the signed-tag release workflow. Pin git tag `v0.2.0`.
-The release carries an SBOM, build provenance attestations, and a signed
-family release manifest; verify it with `git verify-tag v0.2.0` and
-`gh release verify v0.2.0`. What the sandbox enforces is unchanged from
-0.1.0.
+Signed tag `v0.2.0` only: its release workflow failed at attestation (#76),
+so no GitHub Release, SBOM attestation or provenance exists for it. Pin
+`v0.2.1` instead. What the sandbox enforces is unchanged from 0.1.0.
 
 ### Changed
 
@@ -187,6 +199,7 @@ error; there is no silent downgrade. Linux isolation needs Landlock ABI 3
   not survive `exec` and cannot bypass the filesystem allowlist. Pass
   data on stdin or through an allowed path.
 
-[Unreleased]: https://github.com/Sannrox/kekkai/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Sannrox/kekkai/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Sannrox/kekkai/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Sannrox/kekkai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Sannrox/kekkai/releases/tag/v0.1.0
