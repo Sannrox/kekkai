@@ -11,6 +11,21 @@ sandbox enforces is listed here.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-11-03
+
+Pin `v0.2.3` after publication and verify it with `git verify-tag v0.2.3`
+and `gh release verify v0.2.3`. The public API is unchanged from 0.2.2.
+
+### Fixed
+
+- `Namespaces::Isolate`, `Network::Loopback` and filesystem views now work.
+  The user namespace id maps were built from ids read after
+  `unshare(CLONE_NEWUSER)`, so the kernel refused them and every isolate
+  probe failed closed. Hosts that support user namespaces now report them
+  in `capabilities()` and enforce isolation where it was selected (#84).
+- Concurrent prepares and filesystem view probes in one process no longer
+  collide on their temporary directories (#84).
+
 ## [0.2.2] - 2026-11-02
 
 Prepared for the signed-tag release workflow. Pin `v0.2.2` after publication
