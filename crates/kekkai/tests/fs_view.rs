@@ -12,6 +12,16 @@ fn skip(reason: &str) {
     eprintln!("skip: {reason}");
 }
 
+/// Skips when this host cannot isolate, unless `KEKKAI_REQUIRE_ISOLATION` is
+/// set: CI hosts that must isolate fail instead of passing without proof.
+fn unavailable(reason: &str) {
+    assert!(
+        std::env::var_os("KEKKAI_REQUIRE_ISOLATION").is_none(),
+        "isolation required: {reason}"
+    );
+    skip(reason);
+}
+
 fn probe_exe() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_kekkai-probe"))
 }
@@ -37,7 +47,7 @@ fn view_or_skip(overlay: OverlayPersist) -> Option<(Settings, tempfile::TempDir,
     match kekkai::health(&settings) {
         Health::Ok(_) => Some((settings, tmp, workspace)),
         Health::Warning(message) | Health::Error(message) => {
-            skip(&format!("filesystem view unavailable: {message}"));
+            unavailable(&format!("filesystem view unavailable: {message}"));
             None
         }
         _ => {
@@ -113,7 +123,7 @@ fn overlay_keep_persists_writes() {
     match kekkai::health(&settings) {
         Health::Ok(_) => {}
         Health::Warning(message) | Health::Error(message) => {
-            skip(&format!("filesystem view keep unavailable: {message}"));
+            unavailable(&format!("filesystem view keep unavailable: {message}"));
             return;
         }
         _ => {

@@ -46,12 +46,16 @@ pub(super) fn enter_with_view(
     view: Option<&crate::view::ViewPlan>,
     loopback: bool,
 ) -> io::Result<()> {
+    // The outer ids must be read before `unshare`: afterwards they read as
+    // the overflow id, which this process may not map.
+    // SAFETY: getuid/getgid are async-signal-safe.
+    let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     // SAFETY: `unshare` is async-signal-safe. `CLONE_NEWUSER` requires a
     // single-threaded process; `pre_exec` runs after fork.
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    write_id_maps()?;
+    write_id_maps(uid, gid)?;
     let mut rest = libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
     if loopback {
         rest |= libc::CLONE_NEWNET;
@@ -144,11 +148,9 @@ fn bring_lo_up() -> io::Result<()> {
     Ok(())
 }
 
-fn write_id_maps() -> io::Result<()> {
+/// Map root in the new user namespace to the caller's outer `uid` and `gid`.
+fn write_id_maps(uid: libc::uid_t, gid: libc::gid_t) -> io::Result<()> {
     write_file(c"/proc/self/setgroups", b"deny")?;
-    // SAFETY: getuid/getgid are async-signal-safe.
-    let uid = unsafe { libc::getuid() } as u32;
-    let gid = unsafe { libc::getgid() } as u32;
     write_map(c"/proc/self/uid_map", uid)?;
     write_map(c"/proc/self/gid_map", gid)?;
     Ok(())
