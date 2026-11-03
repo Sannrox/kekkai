@@ -1208,12 +1208,8 @@ impl Sandbox {
                 let (scratch, owned_scratch) = match &linux {
                     Some(prepared) => (prepared.scratch.clone(), None),
                     None => {
-                        let nanos = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos())
-                            .unwrap_or(0);
-                        let path = std::env::temp_dir()
-                            .join(format!("kekkai-view-{}-{nanos}", std::process::id()));
+                        let path =
+                            std::env::temp_dir().join(format!("kekkai-view-{}", unique_suffix()));
                         fs::create_dir_all(&path).map_err(|error| {
                             Error::invalid(format!("filesystem view scratch: {error}"))
                         })?;
@@ -2324,6 +2320,19 @@ pub(crate) mod probe_stats {
             LANDLOCK_CHILD.with(Cell::get),
         ]
     }
+}
+
+/// A temp-name suffix unique within this host: process id, time, and a
+/// per-process sequence, so concurrent prepares in one process never collide.
+#[cfg(target_os = "linux")]
+pub(crate) fn unique_suffix() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{nanos}-{seq}", std::process::id())
 }
 
 #[cfg(test)]

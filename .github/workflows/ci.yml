@@ -39,7 +39,13 @@ jobs:
         run: cargo build --locked --workspace --all-targets
       - name: Examples
         run: cargo build --locked --workspace --examples
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test
+        env:
+          # Isolation tests fail here instead of skipping.
+          KEKKAI_REQUIRE_ISOLATION: "1"
         run: |
           cargo test --locked --workspace
           cargo test --locked --workspace --features tokio
@@ -66,7 +72,13 @@ jobs:
           echo "$HOME/kekkai-py/bin" >> "$GITHUB_PATH"
       - name: Build
         run: cargo build --locked --workspace --all-targets
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor.
+      - name: Allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Test
+        env:
+          # Isolation tests fail here instead of skipping.
+          KEKKAI_REQUIRE_ISOLATION: "1"
         run: |
           cargo test --locked --workspace
           cargo test --locked --workspace --features tokio

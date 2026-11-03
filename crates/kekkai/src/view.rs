@@ -81,7 +81,7 @@ pub(super) fn probe() -> Result<(), Error> {
             "filesystem view requires namespace isolate",
         ));
     }
-    let tmp = std::env::temp_dir().join(format!("kekkai-view-probe-{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("kekkai-view-probe-{}", crate::unique_suffix()));
     let lower = tmp.join("lower");
     let ov = tmp.join("ov");
     let _ = std::fs::remove_dir_all(&tmp);
