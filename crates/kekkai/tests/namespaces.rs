@@ -55,7 +55,7 @@ fn isolate_or_skip(backend: Backend) -> Option<(Settings, tempfile::TempDir, Pat
             None
         }
         _ => {
-            skip("unrecognized health variant");
+            unavailable("unrecognized health variant");
             None
         }
     }

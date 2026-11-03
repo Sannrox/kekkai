@@ -51,7 +51,7 @@ fn view_or_skip(overlay: OverlayPersist) -> Option<(Settings, tempfile::TempDir,
             None
         }
         _ => {
-            skip("unrecognized health variant");
+            unavailable("unrecognized health variant");
             None
         }
     }
@@ -127,7 +127,7 @@ fn overlay_keep_persists_writes() {
             return;
         }
         _ => {
-            skip("unrecognized health variant");
+            unavailable("unrecognized health variant");
             return;
         }
     }
