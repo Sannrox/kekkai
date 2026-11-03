@@ -592,11 +592,7 @@ fn send_notif_handshake(sock: RawFd, flag: u8, listener: Option<RawFd>) -> io::R
 }
 
 fn create_scratch() -> Result<PathBuf, Error> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let path = std::env::temp_dir().join(format!("kekkai-scratch-{}-{nanos}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("kekkai-scratch-{}", crate::unique_suffix()));
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| Error::invalid("scratch directory name contains an interior NUL"))?;
     // SAFETY: `c_path` is a valid C string; 0700 keeps TMPDIR private on a

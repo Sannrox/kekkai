@@ -81,11 +81,7 @@ pub(super) fn probe() -> Result<(), Error> {
             "filesystem view requires namespace isolate",
         ));
     }
-    // Unique per probe: concurrent probes in one process must not share and
-    // delete each other's directory.
-    static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = std::env::temp_dir().join(format!("kekkai-view-probe-{}-{seq}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("kekkai-view-probe-{}", crate::unique_suffix()));
     let lower = tmp.join("lower");
     let ov = tmp.join("ov");
     let _ = std::fs::remove_dir_all(&tmp);
