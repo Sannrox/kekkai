@@ -79,9 +79,11 @@ from the tagged commit, so a bug there needs a new rc or patch version.
 
 A re-run resumes the draft release: it deletes the draft's earlier assets and
 uploads the ones it rebuilt. It refuses a release that is already published
-before it builds, in the job that writes the release (a "Re-run failed jobs"
-reuses the earlier verification), and again before it publishes; cut a new
-version instead. One run per tag executes at a time.
+before it builds, first in each job that attests or writes the release (a
+"Re-run failed jobs" reuses the earlier verification), and again before it
+publishes; cut a new version instead. Each check passes only for a draft or
+for no release yet; any other lookup error fails the run. One run per tag
+executes at a time.
 
 Pull requests and `workflow_dispatch` without a tag dry-run the same
 packaging path on that ref. Dry runs never mint attestations or touch a

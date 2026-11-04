@@ -63,20 +63,46 @@ fi
 [[ "$(grep -c 'is already published; cut a new tag instead of re-running' "$workflow")" -ge 3 ]] \
   || fail "${workflow} must refuse a published release early, when drafting, and before publishing"
 # "Re-run failed jobs" reuses verify-tag's outputs, so every job that changes a
-# release refuses a published release itself.
-python3 - "$workflow" <<'PY_JOBS' || fail "${workflow} must refuse a published release in every job that uploads or publishes"
+# release or attests refuses a published release itself, before its first
+# mutation. Every guard fails closed: only a draft or "release not found" passes.
+python3 - "$workflow" <<'PY_JOBS' || fail "${workflow} must refuse a published release before every upload, publish, or attestation"
 import re, sys
 body = open(sys.argv[1]).read().split("\njobs:\n", 1)[1]
-mutating = ("gh release upload", "gh release create", "gh release edit", "gh release delete-asset")
-missing = [
-    block.split(":", 1)[0].strip()
-    for block in re.split(r"(?m)^(?=  [a-z][a-z0-9-]*:\n)", body)
-    if any(m in block for m in mutating)
-    and "- name: Refuse a published release" not in block
-]
-if missing:
-    sys.exit("unguarded jobs: " + ", ".join(missing))
+mutating = ("gh release upload", "gh release create", "gh release edit", "gh release delete-asset", "actions/attest")
+guard = "- name: Refuse a published release"
+bad = []
+for block in re.split(r"(?m)^(?=  [a-z][a-z0-9-]*:\n)", body):
+    hits = [block.index(m) for m in mutating if m in block]
+    if hits and not (guard in block and block.index(guard) < min(hits)):
+        bad.append(block.split(":", 1)[0].strip())
+if bad:
+    sys.exit("unguarded jobs: " + ", ".join(bad))
 PY_JOBS
+# Every release lookup either fails closed on any gh error or treats only
+# "release not found" as absent, and every guard step has that branch.
+python3 - "$workflow" <<'PY_LOOKUPS' || fail "${workflow} release lookups must fail closed: only a draft or release not found may continue"
+import re, sys
+text = open(sys.argv[1]).read()
+allowed = (
+    'if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then',
+    'if ! draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then',
+    'draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"',
+)
+bad = [line.strip() for line in text.splitlines()
+       if 'gh release view' in line and '--json isDraft' in line and line.strip() not in allowed]
+steps = re.split(r"(?m)^(?=      - )", text)
+guards = [s for s in steps if s.startswith("      - name: Refuse a published release")]
+bad += ["guard without the not-found branch" for s in guards
+        if 'elif [[ "$state" != *"release not found"* ]]; then' not in s]
+refuse = '[[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }'
+bad += ["guard that does not refuse a published release" for s in guards if refuse not in s]
+bad += ["draft lookup without the not-found branch" for s in steps
+        if allowed[1] in s and '[[ "$draft" == *"release not found"* ]] ||' not in s]
+if len(guards) < 3:
+    bad.append(f"expected at least 3 guards, found {len(guards)}")
+if bad:
+    sys.exit("fail-open release lookups: " + "; ".join(bad))
+PY_LOOKUPS
 grep -F 'gh release delete-asset "$TAG" "$name" --yes' "$workflow" >/dev/null \
   || fail "${workflow} must drop an earlier run's assets when it resumes a draft"
 grep -F "needs: [verify-tag, package, attest]" "$workflow" >/dev/null \
