@@ -62,6 +62,23 @@ if grep -E -- '--latest( |$|")' "$workflow" >/dev/null; then
 fi
 [[ "$(grep -c 'is already published; cut a new tag instead of re-running' "$workflow")" -ge 3 ]] \
   || fail "${workflow} must refuse a published release early, when drafting, and before publishing"
+# "Re-run failed jobs" reuses verify-tag's outputs, so every job that changes a
+# release refuses a published release itself.
+python3 - "$workflow" <<'PY_JOBS' || fail "${workflow} must refuse a published release in every job that uploads or publishes"
+import re, sys
+body = open(sys.argv[1]).read().split("\njobs:\n", 1)[1]
+mutating = ("gh release upload", "gh release create", "gh release edit", "gh release delete-asset")
+missing = [
+    block.split(":", 1)[0].strip()
+    for block in re.split(r"(?m)^(?=  [a-z][a-z0-9-]*:\n)", body)
+    if any(m in block for m in mutating)
+    and "- name: Refuse a published release" not in block
+]
+if missing:
+    sys.exit("unguarded jobs: " + ", ".join(missing))
+PY_JOBS
+grep -F 'gh release delete-asset "$TAG" "$name" --yes' "$workflow" >/dev/null \
+  || fail "${workflow} must drop an earlier run's assets when it resumes a draft"
 grep -F "needs: [verify-tag, package, attest]" "$workflow" >/dev/null \
   || fail "${workflow} must publish only after every asset job, so a re-run can resume the draft"
 grep -F "id-token: write" "$workflow" >/dev/null || fail "${workflow} must request id-token for provenance"
