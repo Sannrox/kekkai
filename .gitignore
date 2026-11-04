@@ -3,7 +3,9 @@
 .kekkai-state/
 /.worktrees/
 /fuzz/target/
-/fuzz/corpus/
+/fuzz/corpus/**
+!/fuzz/corpus/*/
+!/fuzz/corpus/*/regression-*
 /fuzz/artifacts/
 .DS_Store
 *.swp

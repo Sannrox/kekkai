@@ -47,7 +47,14 @@ fuzz_target!(|data: &[u8]| {
     }
     if data.len() > 24 {
         let s = String::from_utf8_lossy(&data[8..]);
-        let mid = s.len() / 2;
+        // Lossy decoding can yield multi-byte chars, so split on the last
+        // char boundary at or before the byte midpoint.
+        let mid = s
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= s.len() / 2)
+            .last()
+            .unwrap_or(0);
         settings.readable_roots.push(PathBuf::from(format!("/{s}")));
         settings
             .writable_roots
