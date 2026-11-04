@@ -117,8 +117,12 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)" == false ]]; then
-            echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2
+          # Only a draft or "release not found" may continue; any other gh
+          # error (token, network, rate limit) fails closed.
+          if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            [[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }
+          elif [[ "$state" != *"release not found"* ]]; then
+            echo "cannot read release ${TAG}: ${state}" >&2
             exit 1
           fi
       - name: Resolve release commit
@@ -186,6 +190,23 @@ jobs:
       attestation-url: ${{ steps.provenance.outputs.attestation-url }}
       sbom-attestation-url: ${{ steps.sbom.outputs.attestation-url }}
     steps:
+      # Attestation is a mutation, and "Re-run failed jobs" reuses
+      # verify-tag's outputs, so this job checks for itself first.
+      - name: Refuse a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.verify-tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Only a draft or "release not found" may continue; any other gh
+          # error (token, network, rate limit) fails closed.
+          if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            [[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }
+          elif [[ "$state" != *"release not found"* ]]; then
+            echo "cannot read release ${TAG}: ${state}" >&2
+            exit 1
+          fi
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: kekkai-release
@@ -238,8 +259,12 @@ jobs:
           TAG: ${{ needs.verify-tag.outputs.tag }}
         run: |
           set -euo pipefail
-          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || true)" == false ]]; then
-            echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2
+          # Only a draft or "release not found" may continue; any other gh
+          # error (token, network, rate limit) fails closed.
+          if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            [[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }
+          elif [[ "$state" != *"release not found"* ]]; then
+            echo "cannot read release ${TAG}: ${state}" >&2
             exit 1
           fi
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -276,7 +301,10 @@ jobs:
             kind=(--prerelease --latest=false)
           fi
           # A re-run resumes its draft; a published release is never touched.
-          draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo absent)"
+          if ! draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then
+            [[ "$draft" == *"release not found"* ]] || { echo "cannot read release ${TAG}: ${draft}" >&2; exit 1; }
+            draft=absent
+          fi
           case "$draft" in
             true)
               # Every run rebuilds every asset; drop the earlier run's assets
