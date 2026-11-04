@@ -60,8 +60,9 @@ bash scripts/validate-release.sh
   that the skill stubs, vendored scripts and this file (including
   `## Agent skill profile`)
   match it.
-- `scripts/validate-release.sh` checks the tag-triggered release path: signed
-  annotated tags, CHANGELOG notes, SBOM, and the family release manifest.
+- `scripts/validate-release.sh` checks the release path (a `v*` tag push
+  dispatches `release.yml` from `main` for that tag; see `RELEASING.md`):
+  signed annotated tags, CHANGELOG notes, SBOM, and the family release manifest.
   Pull requests and dry runs must not publish or attest.
 
 There is no Makefile yet. When one is added, its targets become the source of
