@@ -94,6 +94,8 @@ steps = re.split(r"(?m)^(?=      - )", text)
 guards = [s for s in steps if s.startswith("      - name: Refuse a published release")]
 bad += ["guard without the not-found branch" for s in guards
         if 'elif [[ "$state" != *"release not found"* ]]; then' not in s]
+refuse = '[[ "$state" == true ]] || { echo "release ${TAG} is already published; cut a new tag instead of re-running" >&2; exit 1; }'
+bad += ["guard that does not refuse a published release" for s in guards if refuse not in s]
 bad += ["draft lookup without the not-found branch" for s in steps
         if allowed[1] in s and '[[ "$draft" == *"release not found"* ]] ||' not in s]
 if len(guards) < 3:
