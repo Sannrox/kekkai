@@ -78,13 +78,29 @@ for block in re.split(r"(?m)^(?=  [a-z][a-z0-9-]*:\n)", body):
 if bad:
     sys.exit("unguarded jobs: " + ", ".join(bad))
 PY_JOBS
-if grep -F '2>/dev/null || true)' "$workflow" >/dev/null || grep -F '2>/dev/null || echo absent)' "$workflow" >/dev/null; then
-  fail "${workflow} release lookups must fail closed when gh errors"
-fi
-guards="$(grep -cF -- '- name: Refuse a published release' "$workflow")"
-not_found="$(grep -cF 'elif [[ "$state" != *"release not found"* ]]; then' "$workflow")"
-[[ "$guards" -ge 3 && "$not_found" -eq "$guards" ]] \
-  || fail "${workflow} every published-release guard must accept only a draft or release not found"
+# Every release lookup either fails closed on any gh error or treats only
+# "release not found" as absent, and every guard step has that branch.
+python3 - "$workflow" <<'PY_LOOKUPS' || fail "${workflow} release lookups must fail closed: only a draft or release not found may continue"
+import re, sys
+text = open(sys.argv[1]).read()
+allowed = (
+    'if state="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then',
+    'if ! draft="$(gh release view "$TAG" --json isDraft --jq .isDraft 2>&1)"; then',
+    'draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"',
+)
+bad = [line.strip() for line in text.splitlines()
+       if 'gh release view' in line and '--json isDraft' in line and line.strip() not in allowed]
+steps = re.split(r"(?m)^(?=      - )", text)
+guards = [s for s in steps if s.startswith("      - name: Refuse a published release")]
+bad += ["guard without the not-found branch" for s in guards
+        if 'elif [[ "$state" != *"release not found"* ]]; then' not in s]
+bad += ["draft lookup without the not-found branch" for s in steps
+        if allowed[1] in s and '[[ "$draft" == *"release not found"* ]] ||' not in s]
+if len(guards) < 3:
+    bad.append(f"expected at least 3 guards, found {len(guards)}")
+if bad:
+    sys.exit("fail-open release lookups: " + "; ".join(bad))
+PY_LOOKUPS
 grep -F 'gh release delete-asset "$TAG" "$name" --yes' "$workflow" >/dev/null \
   || fail "${workflow} must drop an earlier run's assets when it resumes a draft"
 grep -F "needs: [verify-tag, package, attest]" "$workflow" >/dev/null \
