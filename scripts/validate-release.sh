@@ -128,6 +128,9 @@ grep -F '|| fail "could not list merged pull requests for gate flags"' scripts/r
   && grep -F 'command -v gh >/dev/null 2>&1 || fail' scripts/release-package.sh >/dev/null \
   && grep -F ')" || fail "could not read gate flags from the merged pull requests"' scripts/release-package.sh >/dev/null \
   || fail "release-package.sh must fail when the gate flag lookup fails or is truncated"
+package_job="$(awk '/^  package:$/ { job = 1; next } job && /^  [^ ]/ { exit } job' "$workflow")"
+grep -F "pull-requests: read" <<<"$package_job" >/dev/null \
+  || fail "${workflow} package job must read pull requests for the gate flags"
 grep -F -- "--match 'v*' --exclude '*-*' origin/main" scripts/changelog-draft.sh >/dev/null \
   || fail "changelog-draft.sh must start from the last final tag, never an rc or beta tag"
 
