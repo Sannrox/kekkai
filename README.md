@@ -236,9 +236,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 `cargo bench --bench overhead` times `prepare` / `apply` / spawn of
-`/bin/true` / `finish`. CI compares each change against its base on the
-same runner and fails on a 20% p50 regression; see
-[`crates/kekkai/benches/`](https://github.com/Sannrox/kekkai/tree/main/crates/kekkai/benches/).
+`/bin/true` / `finish`. The Linux x86_64 baseline and 20% p95 gate live
+in [`crates/kekkai/benches/`](https://github.com/Sannrox/kekkai/tree/main/crates/kekkai/benches/).
 
 The toolchain is pinned in `rust-toolchain.toml`.
 
