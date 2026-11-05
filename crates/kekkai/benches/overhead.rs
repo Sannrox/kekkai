@@ -1,10 +1,10 @@
 //! Per-job sandbox overhead: `prepare` + `apply` + spawn `/bin/true` + `finish`.
 //!
-//! Run with `cargo bench --bench overhead`. Compare a Linux runner against a
-//! stored baseline with `--check crates/kekkai/benches/baseline-linux-x86_64.json`.
-//! The check compares each sandboxed scenario's p50 relative to the same run's
-//! unsandboxed spawn, so runner speed cancels out (#64), and the median does
-//! not move with one noisy-neighbour tail (#93).
+//! Run with `cargo bench --bench overhead`. `--json` prints the report;
+//! `--check BASE.json` compares this run against a report from the base
+//! commit, measured on the same runner in the same job (#93). The check
+//! compares each sandboxed scenario's p50 relative to the same run's
+//! unsandboxed spawn, so drift between the two runs cancels out (#64).
 //! Scenarios the host cannot enforce print `skip:` and are omitted from the
 //! report. They never count as a passing measurement.
 
@@ -52,11 +52,6 @@ const DEFAULT_WARMUP: usize = 10;
 const THROUGHPUT_JOBS: usize = 50;
 const PARALLEL_THREADS: usize = 4;
 const REGRESSION: f64 = 1.20;
-/// Scenarios whose cost is a fixed wait rather than spawn work, compared in
-/// absolute p50. `linux_native_allowlist` is dominated by the proxy accept
-/// loop's 20 ms poll, which does not scale with runner speed, so dividing it
-/// by the unsandboxed spawn swings with the runner (#93).
-const FIXED_COST: &[&str] = &["linux_native_allowlist"];
 const RLIMIT_OVERHEAD_BUDGET: Duration = Duration::from_millis(2);
 const FULL_STACK_OVERHEAD_BUDGET: Duration = Duration::from_millis(25);
 const MIN_JOBS_PER_S: f64 = 50.0;
@@ -520,12 +515,13 @@ fn check_budgets(report: &Report) -> Result<(), String> {
 }
 
 /// Fails when a sandboxed scenario's p50, as a multiple of the same run's
-/// unsandboxed p50, is more than 20% above that multiple in the baseline.
-/// [`FIXED_COST`] scenarios compare their absolute p50 instead. The
-/// unsandboxed scenario runs no kekkai code, so it is the reference and is
-/// not checked on its own: on a shared runner its absolute time is noise.
-/// p95 is reported but not gated: one slow sample on a shared runner moves
-/// it by 2x (#93).
+/// unsandboxed p50, is more than 20% above that multiple in `path`, a
+/// report from the base commit on the same runner. The hosted runner pool
+/// mixes machine types whose relative costs differ by more than 20%, so a
+/// report stored from one runner is not a stable reference (#93). p95 is
+/// reported but not gated: one slow sample on a shared runner moves it by
+/// 2x. The unsandboxed scenario runs no kekkai code, so it is the reference
+/// and is not checked on its own.
 fn check_baseline(path: &Path, report: &Report) -> Result<(), String> {
     let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let baseline: Report =
@@ -544,6 +540,7 @@ fn check_baseline(path: &Path, report: &Report) -> Result<(), String> {
     };
     let baseline_reference = reference(&baseline, "baseline")?;
     let current_reference = reference(report, "current")?;
+    let mut regressions = Vec::new();
     for previous in &baseline.scenarios {
         if previous.name == "unsandboxed" {
             continue;
@@ -551,29 +548,25 @@ fn check_baseline(path: &Path, report: &Report) -> Result<(), String> {
         let Some(current) = find(report, &previous.name) else {
             continue;
         };
-        let (expected, measured, unit) = if FIXED_COST.contains(&previous.name.as_str()) {
-            (
-                previous.p50_ns as f64 / 1e6,
-                current.p50_ns as f64 / 1e6,
-                "ms",
-            )
-        } else {
-            (
-                previous.p50_ns as f64 / baseline_reference,
-                current.p50_ns as f64 / current_reference,
-                "x unsandboxed",
-            )
-        };
-        let allowed = expected * REGRESSION;
-        if measured > allowed {
-            return Err(format!(
-                "{} p50 is {measured:.2}{unit}, more than 20% above the baseline \
-                 {expected:.2}{unit} (limit {allowed:.2}{unit})",
+        let expected = previous.p50_ns as f64 / baseline_reference;
+        let measured = current.p50_ns as f64 / current_reference;
+        eprintln!(
+            "compare: {} p50 {measured:.2}x unsandboxed, base {expected:.2}x ({:+.1}%)",
+            previous.name,
+            (measured / expected - 1.0) * 100.0
+        );
+        if measured > expected * REGRESSION {
+            regressions.push(format!(
+                "{} p50 is {measured:.2}x unsandboxed, more than 20% above the base {expected:.2}x",
                 previous.name
             ));
         }
     }
-    Ok(())
+    if regressions.is_empty() {
+        Ok(())
+    } else {
+        Err(regressions.join("; "))
+    }
 }
 
 fn find<'a>(report: &'a Report, name: &str) -> Option<&'a ScenarioReport> {
