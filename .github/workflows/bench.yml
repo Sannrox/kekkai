@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "12 5 * * 1"
   workflow_dispatch:
+    inputs:
+      base:
+        description: "Commit or tag to compare against (default: the latest v* tag)"
+        required: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,13 +25,42 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          fetch-tags: true
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - name: Measure prepare/apply/spawn/finish
+      # The hosted pool mixes machine types whose relative costs differ by
+      # more than the 20% gate, so the base is measured on this runner in
+      # this job instead of read from a stored file (#93).
+      - name: Pick the base
+        env:
+          INPUT_BASE: ${{ inputs.base }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          base="${INPUT_BASE:-$PR_BASE}"
+          if [[ -z "$base" ]]; then
+            base="$(git describe --tags --abbrev=0 --match 'v*' HEAD)"
+          fi
+          git rev-parse --verify "${base}^{commit}"
+          echo "BENCH_BASE=$base" >> "$GITHUB_ENV"
+      - name: Measure the base
+        # The base builds into its own target directory: both checkouts get
+        # the same artifact names, so a shared one would run the wrong binary.
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/base-target
+        run: |
+          set -euo pipefail
+          git worktree add --detach "$RUNNER_TEMP/base" "$BENCH_BASE"
+          # Budget failures in the base still print its report; a missing or
+          # broken report fails the next step.
+          (cd "$RUNNER_TEMP/base" && cargo bench --locked --bench overhead -- --json) \
+            > "$RUNNER_TEMP/base.json" || true
+      - name: Measure prepare/apply/spawn/finish against the base
         run: |
           cargo bench --locked --bench overhead -- \
-            --json \
-            --check crates/kekkai/benches/baseline-linux-x86_64.json
+            --check "$RUNNER_TEMP/base.json"

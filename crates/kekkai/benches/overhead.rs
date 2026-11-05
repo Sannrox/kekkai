@@ -1,9 +1,10 @@
 //! Per-job sandbox overhead: `prepare` + `apply` + spawn `/bin/true` + `finish`.
 //!
-//! Run with `cargo bench --bench overhead`. Compare a Linux runner against a
-//! stored baseline with `--check crates/kekkai/benches/baseline-linux-x86_64.json`.
-//! The check compares each sandboxed scenario's p95 relative to the same run's
-//! unsandboxed spawn, so runner speed cancels out (#64).
+//! Run with `cargo bench --bench overhead`. `--json` prints the report;
+//! `--check BASE.json` compares this run against a report from the base
+//! commit, measured on the same runner in the same job (#93). The check
+//! compares each sandboxed scenario's p50 relative to the same run's
+//! unsandboxed spawn, so drift between the two runs cancels out (#64).
 //! Scenarios the host cannot enforce print `skip:` and are omitted from the
 //! report. They never count as a passing measurement.
 
@@ -513,10 +514,14 @@ fn check_budgets(report: &Report) -> Result<(), String> {
     Ok(())
 }
 
-/// Fails when a sandboxed scenario's p95, as a multiple of the same run's
-/// unsandboxed p95, is more than 20% above that multiple in the baseline.
-/// The unsandboxed scenario runs no kekkai code, so it is the reference and
-/// is not checked on its own: on a shared runner its absolute p95 is noise.
+/// Fails when a sandboxed scenario's p50, as a multiple of the same run's
+/// unsandboxed p50, is more than 20% above that multiple in `path`, a
+/// report from the base commit on the same runner. The hosted runner pool
+/// mixes machine types whose relative costs differ by more than 20%, so a
+/// report stored from one runner is not a stable reference (#93). p95 is
+/// reported but not gated: one slow sample on a shared runner moves it by
+/// 2x. The unsandboxed scenario runs no kekkai code, so it is the reference
+/// and is not checked on its own.
 fn check_baseline(path: &Path, report: &Report) -> Result<(), String> {
     let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let baseline: Report =
@@ -529,12 +534,13 @@ fn check_baseline(path: &Path, report: &Report) -> Result<(), String> {
     }
     let reference = |report: &Report, label: &str| {
         find(report, "unsandboxed")
-            .filter(|row| row.p95_ns > 0)
-            .map(|row| row.p95_ns as f64)
+            .filter(|row| row.p50_ns > 0)
+            .map(|row| row.p50_ns as f64)
             .ok_or_else(|| format!("{label} unsandboxed scenario missing"))
     };
     let baseline_reference = reference(&baseline, "baseline")?;
     let current_reference = reference(report, "current")?;
+    let mut regressions = Vec::new();
     for previous in &baseline.scenarios {
         if previous.name == "unsandboxed" {
             continue;
@@ -542,18 +548,25 @@ fn check_baseline(path: &Path, report: &Report) -> Result<(), String> {
         let Some(current) = find(report, &previous.name) else {
             continue;
         };
-        let allowed = previous.p95_ns as f64 / baseline_reference * REGRESSION;
-        let measured = current.p95_ns as f64 / current_reference;
-        if measured > allowed {
-            return Err(format!(
-                "{} p95 is {measured:.2}x unsandboxed, more than 20% above the baseline {:.2}x \
-                 (limit {allowed:.2}x)",
-                previous.name,
-                allowed / REGRESSION
+        let expected = previous.p50_ns as f64 / baseline_reference;
+        let measured = current.p50_ns as f64 / current_reference;
+        eprintln!(
+            "compare: {} p50 {measured:.2}x unsandboxed, base {expected:.2}x ({:+.1}%)",
+            previous.name,
+            (measured / expected - 1.0) * 100.0
+        );
+        if measured > expected * REGRESSION {
+            regressions.push(format!(
+                "{} p50 is {measured:.2}x unsandboxed, more than 20% above the base {expected:.2}x",
+                previous.name
             ));
         }
     }
-    Ok(())
+    if regressions.is_empty() {
+        Ok(())
+    } else {
+        Err(regressions.join("; "))
+    }
 }
 
 fn find<'a>(report: &'a Report, name: &str) -> Option<&'a ScenarioReport> {
