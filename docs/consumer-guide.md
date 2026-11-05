@@ -8,6 +8,20 @@ not schedule work, pick a command, retry, or audit.
 Non-Rust callers and debugging can use the `kekkai run` CLI, which is the
 same path: flags or a JSON file become `Settings`, then `prepare` / `spawn`.
 
+## Depending on kekkai
+
+The package is named `kekkai-sandbox`; the library inside it is `kekkai`,
+so code still writes `use kekkai::...`. Releases after `v0.2.3` use that
+package name. A git-tag dependency on one of them names the package:
+
+```toml
+[dependencies]
+kekkai = { package = "kekkai-sandbox", git = "https://github.com/Sannrox/kekkai", tag = "vX.Y.Z" }
+```
+
+Tags up to `v0.2.3` keep the package name `kekkai`, so an existing pin
+keeps working unchanged.
+
 ## Backends
 
 Choose one. There is no fallback.

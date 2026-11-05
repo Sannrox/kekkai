@@ -10,7 +10,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-kekkai = { path = "../crates/kekkai" }
+kekkai = { package = "kekkai-sandbox", path = "../crates/kekkai" }
 tempfile = "3"
 
 [[bin]]
