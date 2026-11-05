@@ -1,17 +1,126 @@
 # kekkai (結界)
 
-A small Rust library for sandboxing child processes on Linux and macOS:
-on Linux a filesystem allowlist (Landlock), a syscall and network gate
-(seccomp), and resource limits; on macOS a Seatbelt profile for
-filesystem and network rules. Applied to a `std::process::Command`
-before it spawns.
+**Sandbox a child process from Rust: allow these paths, deny the network, cap resources — applied to a `Command` before it spawns.**
 
-See the [consumer guide](docs/consumer-guide.md) for backends, `health`,
-recommended settings, and failure modes. Examples live in
-[`examples/`](examples/). Architecture:
-[ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md) and
-[ADR 0003](docs/decisions/0003-guest-backend-interface.md).
-Not yet published to crates.io.
+[![CI](https://img.shields.io/github/actions/workflow/status/Sannrox/kekkai/ci.yml?branch=main&label=ci)](https://github.com/Sannrox/kekkai/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Sannrox/kekkai)](https://github.com/Sannrox/kekkai/releases)
+[![License](https://img.shields.io/github/license/Sannrox/kekkai)](LICENSE)
+
+[Try it](#try-it) · [Consumer guide](docs/consumer-guide.md) · [Examples](examples/README.md) · [Decisions](docs/decisions/README.md) · [Changelog](CHANGELOG.md)
+
+> Not yet published to crates.io; consumers pin a
+> [git tag](https://github.com/Sannrox/kekkai/releases). kekkai follows
+> semver, and any change to what the sandbox allows or denies is a versioned
+> change — in 0.x, a minor bump.
+
+Kekkai (結界, a protective barrier) confines a child process before it
+spawns. You build a `Settings` value, prepare a sandbox against a workspace
+root, and apply it to a `std::process::Command`: on Linux a filesystem
+allowlist (Landlock), a syscall and network gate (seccomp), and resource
+limits; on macOS a Seatbelt profile for filesystem and network rules.
+Deciding what runs, retries, and auditing stay with the caller
+([ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md)).
+
+- **Filesystem allowlist.** The child reads and writes only the paths you
+  grant, with named roles for read-only inputs, a writable output, and a
+  private per-run scratch directory.
+- **No network by default.** Socket creation is denied unless you allow it,
+  permit listed hosts through a parent CONNECT proxy, or isolate the child to
+  loopback.
+- **Resource limits.** Rlimits always; opt-in cgroup v2 memory, pids, CPU,
+  and IO caps, with live usage snapshots and a report after exit.
+- **Fail closed.** Selecting a backend the host cannot provide is an error,
+  never a silent downgrade; `health` and `capabilities` report what the host
+  supports.
+- **In-process, no daemon.** The default backends install rules in
+  `pre_exec`, so they need no helper; an opt-in userspace guest helper covers
+  mutually distrusting runs.
+- **A CLI for non-Rust callers.** `kekkai run` is the same prepare/spawn path
+  with a JSON run report.
+
+## Try it
+
+From a fresh clone (the toolchain is pinned in `rust-toolchain.toml`), spawn
+a shell that may write only inside the workspace:
+
+```sh
+git clone https://github.com/Sannrox/kekkai && cd kekkai
+mkdir ws
+cargo run --locked --bin kekkai -- run --workspace ws -- \
+  /bin/sh -c 'echo hello > ws/out.txt && cat ws/out.txt; touch /tmp/escape || echo "outside the workspace: denied"'
+```
+
+The write inside the workspace succeeds, the write outside fails, and a JSON
+`RunReport` follows on stderr (output observed on macOS, where the default
+backend is `macos`):
+
+```text
+hello
+touch: /tmp/escape: Operation not permitted
+outside the workspace: denied
+{"schema_version":1,"settings":{"backend":"macos","network":"deny",...
+```
+
+On Linux the default backend is `linux_native` (Landlock ABI 3 or newer plus
+seccomp) and the same write is denied there; on other platforms the default
+is `rlimit`, which enforces no filesystem rules. See the
+[consumer guide](docs/consumer-guide.md) for backends, `health`, recommended
+settings, and failure modes.
+
+From Rust, the same path is three calls:
+
+```rust,no_run
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+use std::process::Command;
+use kekkai::{Backend, Sandbox, Settings};
+
+let settings = Settings::builder()
+    .backend(Backend::LinuxNative)
+    .build();
+let sandbox = kekkai::Sandbox::prepare(&settings, "/path/to/workspace")?;
+let mut cmd = Command::new("python3");
+sandbox.apply(&mut cmd)?;
+let status = cmd.status()?;
+# let _ = status;
+# Ok(())
+# }
+```
+
+Runnable sketches of the two known workloads are in
+[`examples/`](examples/README.md).
+
+## How it works
+
+```mermaid
+flowchart LR
+  S["Settings + workspace root"] --> P["Sandbox::prepare"]
+  H["host probe"] --> P
+  P --> A["apply to Command"]
+  A --> X["pre_exec installs rules:<br/>Landlock or Seatbelt, seccomp, rlimits"]
+  X --> C["child runs confined"]
+  C --> F["finish: usage report"]
+  P -. backend unavailable .-> E["error, never a downgrade"]
+```
+
+A **backend** names the enforcement the caller requires: `none` (development
+only), `rlimit`, `linux_native`, `macos`, or `userspace`. **`Settings`**
+(built with `Settings::builder`) carries the paths, network policy, and
+limits. **`Sandbox::prepare`** validates the settings against what the host
+kernel actually provides and fails closed when something is missing;
+**`apply`** registers the enforcement on a `std::process::Command` so the
+rules install between fork and exec. **`health`** and **`capabilities`**
+report host support up front, and a **`Host`** snapshot lets a runner probe
+once instead of per job. After exit, **`finish`** reports usage and observed
+violations. The `userspace` backend owns spawn through a helper instead of
+`apply` ([ADR 0003](docs/decisions/0003-guest-backend-interface.md)).
+
+**Why not an existing sandboxing tool?** The first-tier backends avoid
+unprivileged user namespaces, which several common distributions and default
+container profiles restrict, so kekkai keeps working inside containers and
+locked-down hosts; and a library gives callers typed errors, host health,
+and semver on enforcement instead of a binary to wrap. The reasoning and the
+rejected alternatives are in
+[ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md).
 
 ## What it does
 
@@ -60,24 +169,21 @@ Not yet published to crates.io.
   sandbox. A missing helper is unavailable. See
   [ADR 0003](docs/decisions/0003-guest-backend-interface.md).
 
-## Intended usage
+### Deadlines, capture, and async
 
-```rust,no_run
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-use std::process::Command;
-use kekkai::{Backend, Sandbox, Settings};
+`Sandbox::spawn_with_deadline` kills the process group after a wall-clock
+limit (`SIGTERM`, then `SIGKILL` and `cgroup.kill`).
+`Sandbox::spawn_with_deadline_captured` keeps stdout and stderr under
+per-stream byte caps (head, tail, or both) and drains overflow so the
+child cannot fill the pipe. The tokio captured helper waits on the
+calling thread.
 
-let settings = Settings::builder()
-    .backend(Backend::LinuxNative)
-    .build();
-let sandbox = kekkai::Sandbox::prepare(&settings, "/path/to/workspace")?;
-let mut cmd = Command::new("python3");
-sandbox.apply(&mut cmd)?;
-let status = cmd.status()?;
-# let _ = status;
-# Ok(())
-# }
-```
+`tokio::process::Command` is supported behind the `tokio` cargo feature
+(`Sandbox::apply_tokio`, `Sandbox::spawn_with_deadline_tokio`,
+`Sandbox::spawn_with_deadline_captured_tokio`).
+`Sandbox::report` is a JSON run report (schema version 1). The `tracing`
+cargo feature adds `kekkai.prepare`, `kekkai.apply`, and `kekkai.finish`
+spans.
 
 ## CLI
 
@@ -94,19 +200,6 @@ The child inherits stdin, stdout, and stderr. After it exits, a JSON
 (or `128+N` when signaled). Usage errors and prepare/apply/spawn failures
 exit 2. Default backend is `linux_native` on Linux, `macos` on macOS, and
 `rlimit` elsewhere. `kekkai --help` documents flags and the JSON file.
-
-`tokio::process::Command` is supported behind the `tokio` cargo feature
-(`Sandbox::apply_tokio`, `Sandbox::spawn_with_deadline_tokio`,
-`Sandbox::spawn_with_deadline_captured_tokio`).
-`Sandbox::report` is a JSON run report (schema version 1). The `tracing`
-cargo feature adds `kekkai.prepare`, `kekkai.apply`, and `kekkai.finish`
-spans.
-`Sandbox::spawn_with_deadline` kills the process group after a wall-clock
-limit (`SIGTERM`, then `SIGKILL` and `cgroup.kill`).
-`Sandbox::spawn_with_deadline_captured` keeps stdout and stderr under
-per-stream byte caps (head, tail, or both) and drains overflow so the
-child cannot fill the pipe. The tokio captured helper waits on the
-calling thread.
 
 ## Non-goals
 
@@ -151,12 +244,6 @@ The toolchain is pinned in `rust-toolchain.toml`.
 Denial tests spawn a real child through `Sandbox::prepare` / `apply`. On
 hosts without Landlock or seccomp they skip with an explicit `skip:`
 message.
-
-## Releasing
-
-Tagged releases follow the family policy in
-[tenkai ADR 0040](https://github.com/Sannrox/tenkai/blob/main/docs/decisions/0040-family-versioning-and-release-policy.md).
-Maintainer steps for this repository: [RELEASING.md](RELEASING.md).
 
 ## Security
 
