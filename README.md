@@ -4,9 +4,9 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Sannrox/kekkai/ci.yml?branch=main&label=ci)](https://github.com/Sannrox/kekkai/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Sannrox/kekkai)](https://github.com/Sannrox/kekkai/releases)
-[![License](https://img.shields.io/github/license/Sannrox/kekkai)](LICENSE)
+[![License](https://img.shields.io/github/license/Sannrox/kekkai)](https://github.com/Sannrox/kekkai/blob/main/LICENSE)
 
-[Try it](#try-it) · [Consumer guide](docs/consumer-guide.md) · [Examples](examples/README.md) · [Decisions](docs/decisions/README.md) · [Changelog](CHANGELOG.md)
+[Try it](#try-it) · [Consumer guide](https://github.com/Sannrox/kekkai/blob/main/docs/consumer-guide.md) · [Examples](https://github.com/Sannrox/kekkai/blob/main/examples/README.md) · [Decisions](https://github.com/Sannrox/kekkai/blob/main/docs/decisions/README.md) · [Changelog](https://github.com/Sannrox/kekkai/blob/main/CHANGELOG.md)
 
 > Not yet published to crates.io; consumers pin a
 > [git tag](https://github.com/Sannrox/kekkai/releases). kekkai follows
@@ -19,7 +19,7 @@ root, and apply it to a `std::process::Command`: on Linux a filesystem
 allowlist (Landlock), a syscall and network gate (seccomp), and resource
 limits; on macOS a Seatbelt profile for filesystem and network rules.
 Deciding what runs, retries, and auditing stay with the caller
-([ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md)).
+([ADR 0002](https://github.com/Sannrox/kekkai/blob/main/docs/decisions/0002-reusable-process-sandbox-library.md)).
 
 - **Filesystem allowlist.** The child reads and writes only the paths you
   grant, with named roles for read-only inputs, a writable output, and a
@@ -64,7 +64,7 @@ outside the workspace: denied
 On Linux the default backend is `linux_native` (Landlock ABI 3 or newer plus
 seccomp) and the same write is denied there; on other platforms the default
 is `rlimit`, which enforces no filesystem rules. See the
-[consumer guide](docs/consumer-guide.md) for backends, `health`, recommended
+[consumer guide](https://github.com/Sannrox/kekkai/blob/main/docs/consumer-guide.md) for backends, `health`, recommended
 settings, and failure modes.
 
 From Rust, the same path is three calls:
@@ -87,7 +87,7 @@ let status = cmd.status()?;
 ```
 
 Runnable sketches of the two known workloads are in
-[`examples/`](examples/README.md).
+[`examples/`](https://github.com/Sannrox/kekkai/blob/main/examples/README.md).
 
 ## How it works
 
@@ -112,7 +112,7 @@ rules install between fork and exec. **`health`** and **`capabilities`**
 report host support up front, and a **`Host`** snapshot lets a runner probe
 once instead of per job. After exit, **`finish`** reports usage and observed
 violations. The `userspace` backend owns spawn through a helper instead of
-`apply` ([ADR 0003](docs/decisions/0003-guest-backend-interface.md)).
+`apply` ([ADR 0003](https://github.com/Sannrox/kekkai/blob/main/docs/decisions/0003-guest-backend-interface.md)).
 
 **Why not an existing sandboxing tool?** The first-tier backends avoid
 unprivileged user namespaces, which several common distributions and default
@@ -120,7 +120,7 @@ container profiles restrict, so kekkai keeps working inside containers and
 locked-down hosts; and a library gives callers typed errors, host health,
 and semver on enforcement instead of a binary to wrap. The reasoning and the
 rejected alternatives are in
-[ADR 0002](docs/decisions/0002-reusable-process-sandbox-library.md).
+[ADR 0002](https://github.com/Sannrox/kekkai/blob/main/docs/decisions/0002-reusable-process-sandbox-library.md).
 
 ## What it does
 
@@ -167,7 +167,7 @@ rejected alternatives are in
   launches a helper that owns spawn. The helper is the process-group
   leader; the payload stays in that group. `apply` is invalid on that
   sandbox. A missing helper is unavailable. See
-  [ADR 0003](docs/decisions/0003-guest-backend-interface.md).
+  [ADR 0003](https://github.com/Sannrox/kekkai/blob/main/docs/decisions/0003-guest-backend-interface.md).
 
 ### Deadlines, capture, and async
 
@@ -220,7 +220,7 @@ backend is selected, or how `health` is reported is a versioned change,
 never a patch-level surprise. In 0.x that is a minor bump.
 
 Public enums and `Settings` are `#[non_exhaustive]`. Construct `Settings`
-with [`Settings::builder`](crates/kekkai/src/lib.rs). Adding a field is
+with [`Settings::builder`](https://github.com/Sannrox/kekkai/blob/main/crates/kekkai/src/lib.rs). Adding a field is
 not a breaking change on that path. The crate denies missing docs
 (`#![deny(missing_docs)]`) and declares `rust-version = "1.97.1"`.
 
@@ -237,7 +237,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 `cargo bench --bench overhead` times `prepare` / `apply` / spawn of
 `/bin/true` / `finish`. The Linux x86_64 baseline and 20% p95 gate live
-in [`crates/kekkai/benches/`](crates/kekkai/benches/).
+in [`crates/kekkai/benches/`](https://github.com/Sannrox/kekkai/tree/main/crates/kekkai/benches/).
 
 The toolchain is pinned in `rust-toolchain.toml`.
 
@@ -247,8 +247,8 @@ message.
 
 ## Security
 
-Report sandbox escapes privately; see [SECURITY.md](SECURITY.md).
+Report sandbox escapes privately; see [SECURITY.md](https://github.com/Sannrox/kekkai/blob/main/SECURITY.md).
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](https://github.com/Sannrox/kekkai/blob/main/LICENSE).

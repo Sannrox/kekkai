@@ -27,6 +27,10 @@ def license_entry(raw: str) -> dict:
     return {"expression": " OR ".join(part.strip() for part in raw.split("/"))}
 
 
+# The published package name; the library inside it is `kekkai`.
+PACKAGE = "kekkai-sandbox"
+
+
 def bom_from_metadata(meta: dict) -> dict:
     workspace = set(meta.get("workspace_members") or [])
     packages = meta.get("packages") or []
@@ -36,7 +40,7 @@ def bom_from_metadata(meta: dict) -> dict:
         pid = pkg.get("id")
         name = pkg.get("name")
         version = pkg.get("version")
-        if pid in workspace and name == "kekkai":
+        if pid in workspace and name == PACKAGE:
             root_pkg = pkg
         purl = f"pkg:cargo/{name}@{version}"
         component = {
@@ -51,8 +55,8 @@ def bom_from_metadata(meta: dict) -> dict:
         if pid not in workspace:
             components.append(component)
     if root_pkg is None:
-        raise SystemExit("cargo metadata did not include workspace package kekkai")
-    root_purl = f"pkg:cargo/kekkai@{root_pkg['version']}"
+        raise SystemExit(f"cargo metadata did not include workspace package {PACKAGE}")
+    root_purl = f"pkg:cargo/{PACKAGE}@{root_pkg['version']}"
     bom = {
         "bomFormat": "CycloneDX",
         "specVersion": "1.5",
@@ -61,7 +65,7 @@ def bom_from_metadata(meta: dict) -> dict:
             "component": {
                 "type": "library",
                 "bom-ref": root_purl,
-                "name": "kekkai",
+                "name": PACKAGE,
                 "version": root_pkg["version"],
                 "purl": root_purl,
             }
@@ -77,11 +81,11 @@ def bom_from_metadata(meta: dict) -> dict:
 
 def self_test() -> None:
     meta = {
-        "workspace_members": ["kekkai 0.1.0 (path+file:///workspace/crates/kekkai)"],
+        "workspace_members": ["kekkai-sandbox 0.1.0 (path+file:///workspace/crates/kekkai)"],
         "packages": [
             {
-                "id": "kekkai 0.1.0 (path+file:///workspace/crates/kekkai)",
-                "name": "kekkai",
+                "id": "kekkai-sandbox 0.1.0 (path+file:///workspace/crates/kekkai)",
+                "name": "kekkai-sandbox",
                 "version": "0.1.0",
                 "license": "Apache-2.0",
             },
