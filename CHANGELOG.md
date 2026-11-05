@@ -11,6 +11,29 @@ sandbox enforces is listed here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-05
+
+The first release published to crates.io, as `kekkai-sandbox`. The library
+is still imported as `kekkai`. The public API and what the sandbox enforces
+are unchanged from 0.2.3. Pin `v0.3.0` after publication and verify it with
+`git verify-tag v0.3.0` and `gh release verify v0.3.0`.
+
+### Migration
+
+- Depend on the crate from crates.io with
+  `kekkai = { package = "kekkai-sandbox", version = "0.3" }`. A git-tag pin
+  past `v0.2.3` also needs `package = "kekkai-sandbox"`; code that uses
+  `kekkai::` does not change (#102).
+
+### Changed
+
+- The package is named `kekkai-sandbox` and carries crates.io and docs.rs
+  metadata, with API docs built for Linux and macOS (#102).
+- A `vX.Y.Z-rc.N` tag publishes a GitHub pre-release that is never marked
+  latest. Releases run from `main` for a signed tag (#89, #90, #91, #92).
+- `SECURITY.md` states what is in and out of scope for each backend and
+  lists the escape tests exactly (#99).
+
 ## [0.2.3] - 2026-11-03
 
 Pin `v0.2.3` after publication and verify it with `git verify-tag v0.2.3`
