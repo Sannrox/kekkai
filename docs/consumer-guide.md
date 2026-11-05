@@ -257,7 +257,7 @@ suite (`tests/escape.rs`) and optional fuzz job are described in
 
 `cargo bench --bench overhead` measures per-job `prepare` / `apply` /
 spawn `/bin/true` / `finish` cost for each backend and opt-in feature.
-A scheduled Linux job compares p95 against
+The Linux Bench job compares p50 against
 `crates/kekkai/benches/baseline-linux-x86_64.json` and fails on a >20%
 regression. Published budgets: `rlimit` ≤ 2 ms p95 over unsandboxed
 spawn; `linux_native` with isolate namespaces, filesystem view, and
