@@ -8,8 +8,9 @@
 
 [Try it](#try-it) · [Consumer guide](https://github.com/Sannrox/kekkai/blob/main/docs/consumer-guide.md) · [Examples](https://github.com/Sannrox/kekkai/blob/main/examples/README.md) · [Decisions](https://github.com/Sannrox/kekkai/blob/main/docs/decisions/README.md) · [Changelog](https://github.com/Sannrox/kekkai/blob/main/CHANGELOG.md)
 
-> Not yet published to crates.io; consumers pin a
-> [git tag](https://github.com/Sannrox/kekkai/releases). kekkai follows
+> Published on crates.io as
+> [`kekkai-sandbox`](https://crates.io/crates/kekkai-sandbox):
+> `kekkai = { package = "kekkai-sandbox", version = "0.3" }`. kekkai follows
 > semver, and any change to what the sandbox allows or denies is a versioned
 > change — in 0.x, a minor bump.
 
