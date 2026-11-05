@@ -1,17 +1,28 @@
+# Published as `kekkai-sandbox` because `kekkai` on crates.io is another
+# crate. The library keeps the name `kekkai`, so callers write
+# `use kekkai::...`.
 [package]
-name = "kekkai"
+name = "kekkai-sandbox"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
+# The only published crate; the workspace default stays `publish = false`.
+publish = true
 readme = "../../README.md"
-description = "Sandbox child processes on Linux and macOS: Landlock or Seatbelt filesystem allowlist, network gate, and resource limits."
-keywords = ["sandbox", "landlock", "seccomp", "isolation", "linux"]
-categories = ["os::linux-apis", "api-bindings"]
+description = "Sandbox child processes on Linux and macOS from Rust: Landlock or Seatbelt filesystem allowlist, network gate, and resource limits applied before spawn."
+keywords = ["sandbox", "landlock", "seccomp", "seatbelt", "isolation"]
+categories = ["os::linux-apis", "os::macos-apis"]
 homepage = "https://github.com/Sannrox/kekkai"
-documentation = "https://docs.rs/kekkai"
+documentation = "https://docs.rs/kekkai-sandbox"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]
+all-features = true
+
+[lib]
+name = "kekkai"
 
 [[bin]]
 name = "kekkai"

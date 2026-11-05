@@ -193,6 +193,12 @@ jobs:
               echo "::notice::${package} is new in this pull request; no baseline to check."
               continue
             fi
+            # A renamed package has no same-name baseline either.
+            base_name="$(git show "${BASE}:${manifest#"$PWD"/}" | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer).get("package", {}).get("name", ""))')"
+            if [[ "$base_name" != "$package" ]]; then
+              echo "::warning::${package} was named ${base_name} at the base; no same-name baseline to check. Review its API by hand."
+              continue
+            fi
             rc=0
             out="$(cargo semver-checks --package "$package" --baseline-rev "$BASE" 2>&1)" || rc=$?
             echo "$out"
