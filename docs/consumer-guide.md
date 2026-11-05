@@ -10,9 +10,16 @@ same path: flags or a JSON file become `Settings`, then `prepare` / `spawn`.
 
 ## Depending on kekkai
 
-The package is named `kekkai-sandbox`; the library inside it is `kekkai`,
-so code still writes `use kekkai::...`. Releases after `v0.2.3` use that
-package name. A git-tag dependency on one of them names the package:
+The package is published on crates.io as `kekkai-sandbox`; the library
+inside it is `kekkai`, so code still writes `use kekkai::...`:
+
+```toml
+[dependencies]
+kekkai = { package = "kekkai-sandbox", version = "0.3" }
+```
+
+To pin a signed release tag instead (`git verify-tag vX.Y.Z`), name the
+package the same way. Releases after `v0.2.3` use that package name:
 
 ```toml
 [dependencies]
