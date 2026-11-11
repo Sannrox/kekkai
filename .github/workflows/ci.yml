@@ -30,8 +30,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install Python duckdb
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-venv
+          scripts/apt-install.sh python3-venv
           python3 -m venv "$HOME/kekkai-py"
           "$HOME/kekkai-py/bin/pip" install duckdb==2.0.0
           echo "$HOME/kekkai-py/bin" >> "$GITHUB_PATH"
@@ -65,8 +64,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install Python duckdb
         run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-venv
+          scripts/apt-install.sh python3-venv
           python3 -m venv "$HOME/kekkai-py"
           "$HOME/kekkai-py/bin/pip" install duckdb==2.0.0
           echo "$HOME/kekkai-py/bin" >> "$GITHUB_PATH"
