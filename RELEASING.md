@@ -54,7 +54,7 @@ runs **main's** `release.yml`, never the copy at the tagged commit.
 `release.yml` refuses a tagged run that does not start from `main`. It then:
 
 - checks out the tag and fetches the annotated tag object;
-- verifies the signed tag with main's `scripts/verify-release-tag.sh` and
+- verifies the signed tag with main's `scripts/release/verify-tag.sh` and
   main's allowed keys against the tagged commit's `Cargo.toml`;
 - requires the tagged commit to be on `main`;
 - validates, tests, builds and packages that commit, writes an SBOM, attests
@@ -88,6 +88,17 @@ executes at a time.
 Pull requests and `workflow_dispatch` without a tag dry-run the same
 packaging path on that ref. Dry runs never mint attestations or touch a
 GitHub Release.
+
+The release logic lives in `scripts/release/`; workflow steps only call it.
+`scripts/release/github-release.sh` is the only script that drafts or
+publishes the GitHub Release, and each of its commands refuses a published
+release. `tests/release/` tests each script and the workflows' structure;
+`scripts/check-workflows.sh` lints the workflows. Both run in CI on every pull
+request, and the tests run again on the tagged commit before packaging.
+
+A tag cut before the release scripts moved to `scripts/release/` cannot be
+re-run: main's workflow calls paths that commit lacks, and the run fails
+before it publishes. Cut a new version instead.
 
 ## Provenance
 
