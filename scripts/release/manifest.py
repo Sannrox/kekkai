@@ -86,52 +86,18 @@ def build_manifest(
     }
 
 
-def self_test() -> None:
-    labels = gate_flags_from_labels(
-        ["risk:breaking", "area:ops", "GATE:mig", "risk:realm", "docs"]
-    )
-    assert labels == ["breaking", "migration", "realm"], labels
-    assert gate_flags_from_labels([]) == []
-    try:
-        build_manifest(
-            component="kekkai",
-            version="0.1.0",
-            git_sha="deadbeef",
-            tag="v0.1.0",
-            dist=pathlib.Path("."),
-            images=[],
-            attestations=[],
-            gate_flags=[],
-        )
-    except SystemExit:
-        pass
-    else:
-        raise SystemExit("expected short git_sha to fail")
-    with __import__("tempfile").TemporaryDirectory() as tmp:
-        dist = pathlib.Path(tmp)
-        (dist / "kekkai-0.1.0-x86_64-unknown-linux-gnu").write_bytes(b"bin")
-        (dist / "SHA256SUMS").write_text("skip\n")
-        manifest = build_manifest(
-            component="kekkai",
-            version="0.1.0",
-            git_sha="a" * 40,
-            tag="v0.1.0",
-            dist=dist,
-            images=[],
-            attestations=["https://github.com/Sannrox/kekkai/attestations/1"],
-            gate_flags=["breaking"],
-        )
-        assert manifest["schema"] == SCHEMA
-        assert manifest["images"] == []
-        assert len(manifest["binaries"]) == 1
-        assert manifest["binaries"][0]["digest"].startswith("sha256:")
-        assert "latest" not in json.dumps(manifest)
-    print("release-manifest self-test passed")
+def record_attestations(path: pathlib.Path, urls: list[str]) -> None:
+    """Set the manifest's attestation URLs, dropping empty ones."""
+    manifest = json.loads(path.read_text())
+    manifest["attestations"] = [url for url in urls if url]
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
 
 def main(argv: list[str]) -> None:
-    if argv == ["--self-test"]:
-        self_test()
+    if argv[:1] == ["record-attestations"]:
+        if len(argv) < 2:
+            raise SystemExit("usage: manifest.py record-attestations MANIFEST [URL...]")
+        record_attestations(pathlib.Path(argv[1]), argv[2:])
         return
     parser = argparse.ArgumentParser()
     parser.add_argument("--component", default="kekkai")

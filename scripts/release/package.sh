@@ -2,11 +2,11 @@
 # Build release artifacts into --out without publishing or attesting.
 #
 # Usage:
-#   bash scripts/release-package.sh --out dist [--tag vX.Y.Z] [--git-sha SHA]
+#   bash scripts/release/package.sh --out dist [--tag vX.Y.Z] [--git-sha SHA]
 #        [--skip-build] [--skip-test] [--skip-github]
 set -euo pipefail
 
-ROOT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_PATH="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_PATH"
 
 OUT=""
@@ -17,7 +17,7 @@ SKIP_TEST=0
 SKIP_GITHUB=0
 
 fail() {
-  printf 'release-package: %s\n' "$1" >&2
+  printf 'package: %s\n' "$1" >&2
   exit 1
 }
 
@@ -50,7 +50,7 @@ host_triple() {
 VERSION="$(workspace_version)"
 if [[ -n "$TAG" ]]; then
   [[ "${TAG#v}" == "$VERSION" ]] || fail "tag ${TAG} does not match workspace version ${VERSION}"
-  python3 "$ROOT_PATH/scripts/changelog-notes.py" "$VERSION" >"${OUT}/RELEASE_NOTES.md"
+  python3 "$ROOT_PATH/scripts/release/notes.py" "$VERSION" >"${OUT}/RELEASE_NOTES.md"
 fi
 if [[ -z "$GIT_SHA" ]]; then
   GIT_SHA="$(git rev-parse HEAD)"
@@ -76,7 +76,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   done
 fi
 
-python3 "$ROOT_PATH/scripts/release-sbom.py" "${OUT}/kekkai.cdx.json"
+python3 "$ROOT_PATH/scripts/release/sbom.py" "${OUT}/kekkai.cdx.json"
 
 python3 -c '
 import hashlib, pathlib, sys
@@ -122,7 +122,7 @@ if [[ -n "$TAG" && "$SKIP_GITHUB" -eq 0 ]]; then
   done <<<"$labels"
 fi
 
-python3 "$ROOT_PATH/scripts/release-manifest.py" \
+python3 "$ROOT_PATH/scripts/release/manifest.py" \
   --component kekkai \
   --version "$VERSION" \
   --git-sha "$GIT_SHA" \

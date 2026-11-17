@@ -79,54 +79,10 @@ def bom_from_metadata(meta: dict) -> dict:
     return bom
 
 
-def self_test() -> None:
-    meta = {
-        "workspace_members": ["kekkai-sandbox 0.1.0 (path+file:///workspace/crates/kekkai)"],
-        "packages": [
-            {
-                "id": "kekkai-sandbox 0.1.0 (path+file:///workspace/crates/kekkai)",
-                "name": "kekkai-sandbox",
-                "version": "0.1.0",
-                "license": "Apache-2.0",
-            },
-            {
-                "id": "libc 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
-                "name": "libc",
-                "version": "0.2.0",
-                "license": "MIT OR Apache-2.0",
-            },
-        ],
-    }
-    meta["packages"].append(
-        {
-            "id": "memchr 2.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
-            "name": "memchr",
-            "version": "2.0.0",
-            "license": "MIT/Unlicense",
-        }
-    )
-    bom = bom_from_metadata(meta)
-    assert bom["bomFormat"] == "CycloneDX"
-    assert bom["serialNumber"].startswith("urn:uuid:")
-    uuid.UUID(bom["serialNumber"].removeprefix("urn:uuid:"))
-    assert bom["metadata"]["component"]["version"] == "0.1.0"
-    by_name = {component["name"]: component for component in bom["components"]}
-    assert by_name["libc"]["licenses"] == [{"expression": "MIT OR Apache-2.0"}]
-    assert by_name["memchr"]["licenses"] == [{"expression": "MIT OR Unlicense"}]
-    # No license entry may carry a compound value as a single SPDX id.
-    for component in bom["components"]:
-        for entry in component.get("licenses", []):
-            assert "license" not in entry, entry
-    print("release-sbom self-test passed")
-
-
 def main(argv: list[str]) -> None:
-    if argv == ["--self-test"]:
-        self_test()
-        return
     if len(argv) != 1:
-        raise SystemExit("usage: release-sbom.py OUT")
-    root = Path(__file__).resolve().parent.parent
+        raise SystemExit("usage: sbom.py OUT")
+    root = Path(__file__).resolve().parents[2]
     bom = bom_from_metadata(cargo_metadata(root))
     out = Path(argv[0])
     out.write_text(json.dumps(bom, indent=2) + "\n")

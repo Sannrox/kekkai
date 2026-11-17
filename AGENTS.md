@@ -51,7 +51,9 @@ cargo test --locked --workspace --features tokio
 cargo test --locked --workspace --features tracing
 cargo test --locked --workspace --features guest
 bash scripts/validate-workflow-skills.sh
-bash scripts/validate-release.sh
+bash scripts/check-workflows.sh
+python3 -m pip install --require-hashes -r tests/requirements.txt
+python3 -m unittest discover -s tests -t .
 ```
 
 - `cargo fmt --all` formats before review.
@@ -60,10 +62,15 @@ bash scripts/validate-release.sh
   that the skill stubs, vendored scripts and this file (including
   `## Agent skill profile`)
   match it.
-- `scripts/validate-release.sh` checks the release path (a `v*` tag push
-  dispatches `release.yml` from `main` for that tag; see `RELEASING.md`):
-  signed annotated tags, CHANGELOG notes, SBOM, and the family release manifest.
-  Pull requests and dry runs must not publish or attest.
+- `scripts/check-workflows.sh` lints `.github/workflows/` with a pinned
+  workflow linter and a pinned workflow security auditor (each binary checked
+  against its SHA-256), the same locally and in CI.
+- `python3 -m unittest discover -s tests -t .` runs the release tests in
+  `tests/release/`: behavior tests for each script in `scripts/release/`
+  (signed tags, CHANGELOG notes, SBOM, the family release manifest, GitHub
+  Release state) and release invariants asserted on the parsed workflow YAML.
+  The YAML tests need PyYAML from `tests/requirements.txt`; the package tests
+  need `cargo` and `jq`. See `RELEASING.md` for the release path.
 
 There is no Makefile yet. When one is added, its targets become the source of
 truth for these commands and this section must point to them.
@@ -126,6 +133,8 @@ Rows beyond `## Testing Guidelines`:
 | `pre_exec` code | review for async-signal safety (no allocation, locks, logging); `// SAFETY:` on every `unsafe` |
 | backend selection / host detection | unsupported backend is an error, not a downgrade; health output covered by tests |
 | public API | SemVer impact stated; docs updated; impact on known users named |
+| workflows | `bash scripts/check-workflows.sh` |
+| release path | `python3 -m unittest discover -s tests -t .` |
 
 ### Release audit
 
@@ -254,7 +263,10 @@ Parallel lanes must not collide. Collision surfaces in this repository are the
 public API and its semver surface (settings types, prepare/apply, the health
 report), the Landlock ruleset, the seccomp filter, and resource-limit
 enforcement (rlimit and cgroup). Lanes that would both change one of these
-surfaces run in sequence, not in parallel.
+surfaces run in sequence, not in parallel. The release path
+(`.github/workflows/release*.yml`, `scripts/release/`, `tests/release/`,
+`security/`, `RELEASING.md`) and `scripts/check-workflows.sh` are collision
+surfaces too.
 
 A lane publishes its first Verified commit to the claim branch as a draft Pull
 Request that closes the Issue. Public GitHub lane fields may list only: claim
@@ -302,6 +314,14 @@ ABI, seccomp, cgroup v2 delegation) detect it and skip with an explicit
 message; they never pass vacuously. Offline `cargo test` must stay green on
 hosts without those features. When porting code from another project, port its
 tests with it.
+
+Release and CI logic lives in scripts under `scripts/release/` with
+`unittest` tests in `tests/release/`, one file per script; workflow steps only
+call them. Never grep raw workflow text: a workflow invariant no linter
+expresses gets a test that parses the YAML and asserts its structure
+(triggers, permissions, job graph, step order, which script a step runs),
+never step names or wording. Tests use temp paths that include the process
+id, so parallel runs do not collide.
 
 ## Commit & Pull Request Guidelines
 
