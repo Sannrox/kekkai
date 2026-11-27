@@ -4,6 +4,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,6 +19,7 @@ pub(super) struct EgressProxy {
     denials: Arc<Mutex<Vec<SandboxViolation>>>,
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    wake: Mutex<Option<UnixListener>>,
 }
 
 impl std::fmt::Debug for EgressProxy {
@@ -32,7 +34,7 @@ impl EgressProxy {
     pub(super) fn start(path: PathBuf, allow: Vec<AllowHost>) -> io::Result<Arc<Self>> {
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path)?;
-        listener.set_nonblocking(true)?;
+        let wake = listener.try_clone()?;
         let denials = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let allow = Arc::new(allow);
@@ -45,6 +47,7 @@ impl EgressProxy {
             denials,
             stop,
             thread: Mutex::new(Some(thread)),
+            wake: Mutex::new(Some(wake)),
         }))
     }
 
@@ -56,6 +59,16 @@ impl EgressProxy {
 impl Drop for EgressProxy {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // The socket path may already be gone (scratch cleanup unlinks it
+        // while the listen fd is still in accept). Wake that fd directly.
+        if let Ok(mut wake) = self.wake.lock()
+            && let Some(listener) = wake.take()
+        {
+            // SAFETY: `listener` is a dup of the accept thread's listen fd.
+            // SHUT_RDWR unblocks a blocking accept without a client connect.
+            let _ = unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) };
+        }
+        let _ = UnixStream::connect(&self.path);
         if let Ok(mut thread) = self.thread.lock()
             && let Some(handle) = thread.take()
         {
@@ -96,16 +109,17 @@ fn accept_loop(
     denials: Arc<Mutex<Vec<SandboxViolation>>>,
     stop: Arc<AtomicBool>,
 ) {
-    while !stop.load(Ordering::Relaxed) {
+    loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
                 let allow = allow.clone();
                 let denials = denials.clone();
                 thread::spawn(move || handle_client(stream, &allow, &denials));
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(20));
-            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
         }
     }
@@ -218,6 +232,7 @@ fn splice(mut a: UnixStream, mut b: TcpStream) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn parse_target_host_port_and_v6() {
@@ -248,5 +263,33 @@ mod tests {
         assert!(!host_allowed(&allow, "93.184.216.34", 443));
         assert!(host_allowed(&allow, "127.0.0.1", 9));
         assert!(!host_allowed(&allow, "8.8.8.8", 53));
+    }
+
+    fn proxy_sock(label: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp
+            .path()
+            .join(format!("proxy-{}-{label}.sock", std::process::id()));
+        (tmp, path)
+    }
+
+    #[test]
+    fn drop_unblocks_blocking_accept() {
+        let (_tmp, path) = proxy_sock("drop");
+        let proxy = EgressProxy::start(path.clone(), Vec::new()).unwrap();
+        assert!(path.exists(), "proxy socket should exist after start");
+        drop(proxy);
+        assert!(
+            !path.exists(),
+            "drop must join the accept thread and remove the socket"
+        );
+    }
+
+    #[test]
+    fn drop_joins_after_socket_path_unlinked() {
+        let (_tmp, path) = proxy_sock("unlink");
+        let proxy = EgressProxy::start(path.clone(), Vec::new()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        drop(proxy);
     }
 }
